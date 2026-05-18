@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -66,7 +67,7 @@ def rename_and_convert_flax_params(flax_dict):
         "decoder.logits_dense.weight": "decoder.lm_head.weight",
     }
 
-    for key in flax_dict:
+    for key in flax_dict.keys():
         if "target" in key:
             # remove the first prefix from the key
             new_key = ".".join(key[1:])
@@ -92,11 +93,11 @@ def rename_and_convert_flax_params(flax_dict):
 
     converted_torch_dict = {}
     # convert converted_dict into torch format
-    for key, value in converted_dict.items():
+    for key in converted_dict.keys():
         if ("embed_tokens" not in key) and ("embedder" not in key):
-            converted_torch_dict[key] = torch.from_numpy(value.T)
+            converted_torch_dict[key] = torch.from_numpy(converted_dict[key].T)
         else:
-            converted_torch_dict[key] = torch.from_numpy(value)
+            converted_torch_dict[key] = torch.from_numpy(converted_dict[key])
 
     return converted_torch_dict
 
@@ -138,7 +139,7 @@ def convert_pix2struct_original_pytorch_checkpoint_to_hf(
     model.save_pretrained(pytorch_dump_folder_path)
     processor.save_pretrained(pytorch_dump_folder_path)
 
-    print(f"Model saved in {pytorch_dump_folder_path}")
+    print("Model saved in {}".format(pytorch_dump_folder_path))
 
 
 if __name__ == "__main__":

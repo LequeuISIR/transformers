@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,13 +16,13 @@
 
 URL: https://github.com/microsoft/CvT"""
 
+
 import argparse
 import json
 from collections import OrderedDict
-from pathlib import Path
 
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import cached_download, hf_hub_url
 
 from transformers import AutoImageProcessor, CvtConfig, CvtForImageClassification
 
@@ -276,18 +277,20 @@ def final():
 
 def convert_cvt_checkpoint(cvt_model, image_size, cvt_file_name, pytorch_dump_folder):
     """
-    Function to convert the microsoft cvt checkpoint to huggingface checkpoint
+    Fucntion to convert the microsoft cvt checkpoint to huggingface checkpoint
     """
     img_labels_file = "imagenet-1k-id2label.json"
     num_labels = 1000
 
     repo_id = "huggingface/label-files"
-    id2label = json.loads(Path(hf_hub_download(repo_id, img_labels_file, repo_type="dataset")).read_text())
+    num_labels = num_labels
+    id2label = json.load(open(cached_download(hf_hub_url(repo_id, img_labels_file, repo_type="dataset")), "r"))
     id2label = {int(k): v for k, v in id2label.items()}
 
+    id2label = id2label
     label2id = {v: k for k, v in id2label.items()}
 
-    config = CvtConfig(num_labels=num_labels, id2label=id2label, label2id=label2id)
+    config = config = CvtConfig(num_labels=num_labels, id2label=id2label, label2id=label2id)
 
     # For depth size 13 (13 = 1+2+10)
     if cvt_model.rsplit("/", 1)[-1][4:6] == "13":
@@ -306,7 +309,7 @@ def convert_cvt_checkpoint(cvt_model, image_size, cvt_file_name, pytorch_dump_fo
     model = CvtForImageClassification(config)
     image_processor = AutoImageProcessor.from_pretrained("facebook/convnext-base-224-22k-1k")
     image_processor.size["shortest_edge"] = image_size
-    original_weights = torch.load(cvt_file_name, map_location=torch.device("cpu"), weights_only=True)
+    original_weights = torch.load(cvt_file_name, map_location=torch.device("cpu"))
 
     huggingface_weights = OrderedDict()
     list_of_state_dict = []

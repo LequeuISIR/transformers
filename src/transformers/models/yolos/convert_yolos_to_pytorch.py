@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +14,12 @@
 # limitations under the License.
 """Convert YOLOS checkpoints from the original repository. URL: https://github.com/hustvl/YOLOS"""
 
+
 import argparse
 import json
-from io import BytesIO
 from pathlib import Path
 
-import httpx
+import requests
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -123,7 +124,7 @@ def rename_key(name: str) -> str:
 
 
 def convert_state_dict(orig_state_dict: dict, model: YolosForObjectDetection) -> dict:
-    for key in orig_state_dict.copy():
+    for key in orig_state_dict.copy().keys():
         val = orig_state_dict.pop(key)
 
         if "qkv" in key:
@@ -149,9 +150,8 @@ def convert_state_dict(orig_state_dict: dict, model: YolosForObjectDetection) ->
 # We will verify our results on an image of cute cats
 def prepare_img() -> torch.Tensor:
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    with httpx.stream("GET", url) as response:
-        image = Image.open(BytesIO(response.read()))
-    return image
+    im = Image.open(requests.get(url, stream=True).raw)
+    return im
 
 
 @torch.no_grad()
@@ -164,7 +164,7 @@ def convert_yolos_checkpoint(
     config = get_yolos_config(yolos_name)
 
     # load original state_dict
-    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)["model"]
+    state_dict = torch.load(checkpoint_path, map_location="cpu")["model"]
 
     # load 🤗 model
     model = YolosForObjectDetection(config)
@@ -238,8 +238,8 @@ def convert_yolos_checkpoint(
 
         print("Pushing to the hub...")
         model_name = model_mapping[yolos_name]
-        image_processor.push_to_hub(repo_id=f"hustvl/{model_name}")
-        model.push_to_hub(repo_id=f"hustvl/{model_name}")
+        image_processor.push_to_hub(model_name, organization="hustvl")
+        model.push_to_hub(model_name, organization="hustvl")
 
 
 if __name__ == "__main__":
@@ -261,9 +261,7 @@ if __name__ == "__main__":
         "--pytorch_dump_folder_path", default=None, type=str, help="Path to the output PyTorch model directory."
     )
     parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="Whether or not to push the converted model to the Hugging Face hub.",
+        "--push_to_hub", action="store_true", help="Whether or not to push the converted model to the 🤗 hub."
     )
 
     args = parser.parse_args()

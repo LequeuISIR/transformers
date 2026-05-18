@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Convert Musicgen Melody checkpoints from the original repository."""
-
 import argparse
-from collections import OrderedDict
 from pathlib import Path
+from typing import Dict, OrderedDict, Tuple
 
 import torch
 from audiocraft.models import MusicGen
@@ -71,7 +71,7 @@ def rename_keys(name):
     return name
 
 
-def rename_state_dict(state_dict: OrderedDict, hidden_size: int) -> tuple[dict, dict]:
+def rename_state_dict(state_dict: OrderedDict, hidden_size: int) -> Tuple[Dict, Dict]:
     """Function that takes the fairseq MusicgenMelody state dict and renames it according to the HF
     module names. It further partitions the state dict into the decoder (LM) state dict, and that for the
     text encoder projection and for the audio encoder projection."""
@@ -253,7 +253,7 @@ if __name__ == "__main__":
         "--push_to_hub",
         default="musicgen-melody",
         type=str,
-        help="Where to upload the converted model on the Hugging Face hub.",
+        help="Where to upload the converted model on the 🤗 hub.",
     )
     parser.add_argument(
         "--device", default="cpu", type=str, help="Torch device to run the conversion, either cpu or cuda."

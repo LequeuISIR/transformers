@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2020 Optuna, Hugging Face
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,35 +12,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Logging utilities."""
+""" Logging utilities."""
+
 
 import functools
 import logging
 import os
 import sys
 import threading
-from collections.abc import Callable
 from logging import (
     CRITICAL,  # NOQA
-    DEBUG,
-    ERROR,
+    DEBUG,  # NOQA
+    ERROR,  # NOQA
     FATAL,  # NOQA
-    INFO,
+    INFO,  # NOQA
     NOTSET,  # NOQA
     WARN,  # NOQA
-    WARNING,
+    WARNING,  # NOQA
 )
 from logging import captureWarnings as _captureWarnings
-from typing import Any
+from typing import Optional
 
 import huggingface_hub.utils as hf_hub_utils
 from tqdm import auto as tqdm_lib
 
-from .._typing import TransformersLogger
-
 
 _lock = threading.Lock()
-_default_handler: logging.Handler | None = None
+_default_handler: Optional[logging.Handler] = None
 
 log_levels = {
     "detail": logging.DEBUG,  # will also print filename and line number
@@ -53,7 +52,6 @@ log_levels = {
 _default_log_level = logging.WARNING
 
 _tqdm_active = not hf_hub_utils.are_progress_bars_disabled()
-_tqdm_hook: Callable[[Callable[..., Any], tuple[Any, ...], dict[str, Any]], Any] | None = None
 
 
 def _get_default_logging_level():
@@ -68,7 +66,7 @@ def _get_default_logging_level():
         else:
             logging.getLogger().warning(
                 f"Unknown option TRANSFORMERS_VERBOSITY={env_level_str}, "
-                f"has to be one of: {', '.join(log_levels.keys())}"
+                f"has to be one of: { ', '.join(log_levels.keys()) }"
             )
     return _default_log_level
 
@@ -99,21 +97,12 @@ def _configure_library_root_logger() -> None:
         library_root_logger = _get_library_root_logger()
         library_root_logger.addHandler(_default_handler)
         library_root_logger.setLevel(_get_default_logging_level())
-        # Always show lib when logging in non-verbose mode. Note, other libs
-        # use `transformers.logger` directly, so we check `lib_name` to be safe
-        lib_name = _get_library_name()
-        logging_format = f"[{lib_name}] %(message)s"
-
         # if logging level is debug, we add pathname and lineno to formatter for easy debugging
         if os.getenv("TRANSFORMERS_VERBOSITY", None) == "detail":
-            logging_format = "%(levelname)s [%(name)s:%(lineno)s] %(asctime)s %(message)s"
+            formatter = logging.Formatter("[%(levelname)s|%(pathname)s:%(lineno)s] %(asctime)s >> %(message)s")
+            _default_handler.setFormatter(formatter)
 
-        formatter = logging.Formatter(logging_format)
-        _default_handler.setFormatter(formatter)
-
-        ci = os.getenv("CI")
-        is_ci = ci is not None and ci.upper() in {"1", "ON", "YES", "TRUE"}
-        library_root_logger.propagate = is_ci
+        library_root_logger.propagate = False
 
 
 def _reset_library_root_logger() -> None:
@@ -156,7 +145,7 @@ def captureWarnings(capture):
     _captureWarnings(capture)
 
 
-def get_logger(name: str | None = None) -> TransformersLogger:
+def get_logger(name: Optional[str] = None) -> logging.Logger:
     """
     Return a logger with the specified name.
 
@@ -319,13 +308,13 @@ def warning_advice(self, *args, **kwargs):
     This method is identical to `logger.warning()`, but if env var TRANSFORMERS_NO_ADVISORY_WARNINGS=1 is set, this
     warning will not be printed
     """
-    no_advisory_warnings = os.getenv("TRANSFORMERS_NO_ADVISORY_WARNINGS")
+    no_advisory_warnings = os.getenv("TRANSFORMERS_NO_ADVISORY_WARNINGS", False)
     if no_advisory_warnings:
         return
     self.warning(*args, **kwargs)
 
 
-logging.Logger.warning_advice = warning_advice  # type: ignore[unresolved-attribute]
+logging.Logger.warning_advice = warning_advice
 
 
 @functools.lru_cache(None)
@@ -340,22 +329,7 @@ def warning_once(self, *args, **kwargs):
     self.warning(*args, **kwargs)
 
 
-logging.Logger.warning_once = warning_once  # type: ignore[unresolved-attribute]
-
-
-@functools.lru_cache(None)
-def info_once(self, *args, **kwargs):
-    """
-    This method is identical to `logger.info()`, but will emit the info with the same message only once
-
-    Note: The cache is for the function arguments, so 2 different callers using the same arguments will hit the cache.
-    The assumption here is that all warning messages are unique across the code. If they aren't then need to switch to
-    another type of cache that includes the caller frame information in the hashing function.
-    """
-    self.info(*args, **kwargs)
-
-
-logging.Logger.info_once = info_once  # type: ignore[unresolved-attribute]
+logging.Logger.warning_once = warning_once
 
 
 class EmptyTqdm:
@@ -384,10 +358,10 @@ class EmptyTqdm:
 
 class _tqdm_cls:
     def __call__(self, *args, **kwargs):
-        factory = tqdm_lib.tqdm if _tqdm_active else EmptyTqdm
-        if _tqdm_hook is not None:
-            return _tqdm_hook(factory, args, kwargs)
-        return factory(*args, **kwargs)
+        if _tqdm_active:
+            return tqdm_lib.tqdm(*args, **kwargs)
+        else:
+            return EmptyTqdm(*args, **kwargs)
 
     def set_lock(self, *args, **kwargs):
         self._lock = None
@@ -404,6 +378,7 @@ tqdm = _tqdm_cls()
 
 def is_progress_bar_enabled() -> bool:
     """Return a boolean indicating whether tqdm progress bars are enabled."""
+    global _tqdm_active
     return bool(_tqdm_active)
 
 
@@ -419,23 +394,3 @@ def disable_progress_bar():
     global _tqdm_active
     _tqdm_active = False
     hf_hub_utils.disable_progress_bars()
-
-
-def set_tqdm_hook(hook: Callable[[Callable[..., Any], tuple[Any, ...], dict[str, Any]], Any] | None):
-    """
-    Set a hook that customizes tqdm creation.
-
-    The hook is called with the tqdm factory to use (either `tqdm.auto.tqdm` or an empty shim), along with the
-    positional and keyword arguments that would have been passed to tqdm. The hook should return an object compatible
-    with tqdm (i.e. implementing the methods your code relies on, such as `update`, `close`, context manager methods,
-    etc.).
-
-    Passing `None` clears the hook.
-
-    Returns:
-        The previous hook, which can be restored later.
-    """
-    global _tqdm_hook
-    previous_hook = _tqdm_hook
-    _tqdm_hook = hook
-    return previous_hook

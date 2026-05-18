@@ -1,23 +1,11 @@
-# Copyright 2023 The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from typing import Any, Union, overload
+from typing import List, Union
 
 import numpy as np
 
 from ..utils import (
     ExplicitEnum,
     add_end_docstrings,
+    is_tf_available,
     is_torch_available,
     is_vision_available,
     logging,
@@ -31,9 +19,10 @@ if is_vision_available():
 
     from ..image_utils import load_image
 
-if is_torch_available():
-    import torch
+if is_tf_available():
+    from ..models.auto.modeling_tf_auto import TF_MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES
 
+if is_torch_available():
     from ..models.auto.modeling_auto import MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES
 
 logger = logging.get_logger(__name__)
@@ -95,15 +84,15 @@ class ImageClassificationPipeline(Pipeline):
     """
 
     function_to_apply: ClassificationFunction = ClassificationFunction.NONE
-    _load_processor = False
-    _load_image_processor = True
-    _load_feature_extractor = False
-    _load_tokenizer = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         requires_backends(self, "vision")
-        self.check_model_type(MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES)
+        self.check_model_type(
+            TF_MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES
+            if self.framework == "tf"
+            else MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES
+        )
 
     def _sanitize_parameters(self, top_k=None, function_to_apply=None, timeout=None):
         preprocess_params = {}
@@ -118,20 +107,12 @@ class ImageClassificationPipeline(Pipeline):
             postprocess_params["function_to_apply"] = function_to_apply
         return preprocess_params, {}, postprocess_params
 
-    @overload
-    def __call__(self, inputs: Union[str, "Image.Image"], **kwargs: Any) -> list[dict[str, Any]]: ...
-
-    @overload
-    def __call__(self, inputs: list[str] | list["Image.Image"], **kwargs: Any) -> list[list[dict[str, Any]]]: ...
-
-    def __call__(
-        self, inputs: Union[str, list[str], "Image.Image", list["Image.Image"]], **kwargs: Any
-    ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]:
+    def __call__(self, images: Union[str, List[str], "Image.Image", List["Image.Image"]], **kwargs):
         """
         Assign labels to the image(s) passed as inputs.
 
         Args:
-            inputs (`str`, `list[str]`, `PIL.Image` or `list[PIL.Image]`):
+            images (`str`, `List[str]`, `PIL.Image` or `List[PIL.Image]`):
                 The pipeline handles three types of images:
 
                 - A string containing a http link pointing to an image
@@ -173,17 +154,11 @@ class ImageClassificationPipeline(Pipeline):
             - **label** (`str`) -- The label identified by the model.
             - **score** (`int`) -- The score attributed by the model for that label.
         """
-        # After deprecation of this is completed, remove the default `None` value for `images`
-        if "images" in kwargs:
-            inputs = kwargs.pop("images")
-        if inputs is None:
-            raise ValueError("Cannot call the image-classification pipeline without an inputs argument!")
-        return super().__call__(inputs, **kwargs)
+        return super().__call__(images, **kwargs)
 
     def preprocess(self, image, timeout=None):
         image = load_image(image, timeout=timeout)
-        model_inputs = self.image_processor(images=image, return_tensors="pt")
-        model_inputs = model_inputs.to(self.dtype)
+        model_inputs = self.image_processor(images=image, return_tensors=self.framework)
         return model_inputs
 
     def _forward(self, model_inputs):
@@ -205,10 +180,7 @@ class ImageClassificationPipeline(Pipeline):
             top_k = self.model.config.num_labels
 
         outputs = model_outputs["logits"][0]
-        if outputs.dtype in (torch.bfloat16, torch.float16):
-            outputs = outputs.to(torch.float32).numpy()
-        else:
-            outputs = outputs.numpy()
+        outputs = outputs.numpy()
 
         if function_to_apply == ClassificationFunction.SIGMOID:
             scores = sigmoid(outputs)

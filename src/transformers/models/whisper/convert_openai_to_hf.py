@@ -21,7 +21,7 @@ import os
 import tempfile
 import urllib
 import warnings
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import torch
 from huggingface_hub.utils import insecure_hashlib
@@ -38,7 +38,7 @@ from transformers import (
     WhisperTokenizerFast,
 )
 from transformers.models.whisper.tokenization_whisper import LANGUAGES, bytes_to_unicode
-from transformers.utils.import_utils import is_tiktoken_available
+from transformers.utils.import_utils import _is_package_available
 
 
 _MODELS = {
@@ -65,7 +65,7 @@ _TOKENIZERS = {
 def _get_generation_config(
     is_multilingual: bool,
     num_languages: int = 100,
-    openai_version: str | None = None,
+    openai_version: Optional[str] = None,
 ) -> GenerationConfig:
     """
     Loads the appropriate generation config from HF repo
@@ -157,7 +157,7 @@ def _download(url: str, root: str) -> Any:
     if os.path.isfile(download_target):
         model_bytes = open(download_target, "rb").read()
         if insecure_hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
-            return torch.load(io.BytesIO(model_bytes), weights_only=True)
+            return torch.load(io.BytesIO(model_bytes))
         else:
             warnings.warn(f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file")
 
@@ -176,21 +176,21 @@ def _download(url: str, root: str) -> Any:
     model_bytes = open(download_target, "rb").read()
     if insecure_hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
         raise RuntimeError(
-            "Model has been downloaded but the SHA256 checksum does not match. Please retry loading the model."
+            "Model has been downloaded but the SHA256 checksum does not not match. Please retry loading the model."
         )
 
-    return torch.load(io.BytesIO(model_bytes), weights_only=True)
+    return torch.load(io.BytesIO(model_bytes))
 
 
 def convert_openai_whisper_to_tfms(
     checkpoint_path, pytorch_dump_folder_path
-) -> tuple[WhisperForConditionalGeneration, bool, int]:
+) -> Tuple[WhisperForConditionalGeneration, bool, int]:
     if ".pt" not in checkpoint_path:
         root = os.path.dirname(pytorch_dump_folder_path) or "."
         original_checkpoint = _download(_MODELS[checkpoint_path], root)
         openai_version = checkpoint_path
     else:
-        original_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        original_checkpoint = torch.load(checkpoint_path, map_location="cpu")
         openai_version = None
 
     dimensions = original_checkpoint["dims"]
@@ -317,7 +317,8 @@ def convert_tiktoken_to_hf(
 
         with open(merge_file, "w", encoding="utf-8") as writer:
             writer.write("#version: 0.2\n")
-            writer.writelines(bpe_tokens + "\n" for bpe_tokens in merges)
+            for bpe_tokens in merges:
+                writer.write(bpe_tokens + "\n")
 
         hf_tokenizer = WhisperTokenizer(vocab_file, merge_file)
 
@@ -345,12 +346,10 @@ if __name__ == "__main__":
 
     if args.convert_preprocessor:
         try:
-            if not is_tiktoken_available(with_blobfile=False):
-                raise ModuleNotFoundError(
-                    """`tiktoken` is not installed, use `pip install tiktoken` to convert the tokenizer"""
-                )
-        except Exception as e:
-            print(e)
+            if not _is_package_available("tiktoken"):
+                raise """`tiktoken` is not installed, use `pip install tiktoken` to convert the tokenizer"""
+        except Exception:
+            pass
         else:
             from tiktoken.load import load_tiktoken_bpe
 

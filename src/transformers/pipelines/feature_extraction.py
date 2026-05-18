@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Dict
 
 from ..utils import add_end_docstrings
 from .base import GenericTensor, Pipeline, build_pipeline_init_args
@@ -24,7 +24,7 @@ class FeatureExtractionPipeline(Pipeline):
 
     >>> extractor = pipeline(model="google-bert/bert-base-uncased", task="feature-extraction")
     >>> result = extractor("This is a simple test.", return_tensors=True)
-    >>> result.shape  # This is a tensor of shape [1, sequence_length, hidden_dimension] representing the input string.
+    >>> result.shape  # This is a tensor of shape [1, sequence_lenth, hidden_dimension] representing the input string.
     torch.Size([1, 8, 768])
     ```
 
@@ -36,11 +36,6 @@ class FeatureExtractionPipeline(Pipeline):
     All models may be used for this pipeline. See a list of all models, including community-contributed models on
     [huggingface.co/models](https://huggingface.co/models).
     """
-
-    _load_processor = False
-    _load_image_processor = False
-    _load_feature_extractor = False
-    _load_tokenizer = True
 
     def _sanitize_parameters(self, truncation=None, tokenize_kwargs=None, return_tensors=None, **kwargs):
         if tokenize_kwargs is None:
@@ -61,8 +56,8 @@ class FeatureExtractionPipeline(Pipeline):
 
         return preprocess_params, {}, postprocess_params
 
-    def preprocess(self, inputs, **tokenize_kwargs) -> dict[str, GenericTensor]:
-        model_inputs = self.tokenizer(inputs, return_tensors="pt", **tokenize_kwargs)
+    def preprocess(self, inputs, **tokenize_kwargs) -> Dict[str, GenericTensor]:
+        model_inputs = self.tokenizer(inputs, return_tensors=self.framework, **tokenize_kwargs)
         return model_inputs
 
     def _forward(self, model_inputs):
@@ -73,14 +68,17 @@ class FeatureExtractionPipeline(Pipeline):
         # [0] is the first available tensor, logits or last_hidden_state.
         if return_tensors:
             return model_outputs[0]
-        return model_outputs[0].tolist()
+        if self.framework == "pt":
+            return model_outputs[0].tolist()
+        elif self.framework == "tf":
+            return model_outputs[0].numpy().tolist()
 
-    def __call__(self, *args: str | list[str], **kwargs: Any) -> Any | list[Any]:
+    def __call__(self, *args, **kwargs):
         """
-        Extract the features of the input(s) text.
+        Extract the features of the input(s).
 
         Args:
-            args (`str` or `list[str]`): One or several texts (or one list of texts) to get the features of.
+            args (`str` or `List[str]`): One or several texts (or one list of texts) to get the features of.
 
         Return:
             A nested list of `float`: The features computed by the model.

@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2018 Hao Tan, Mohit Bansal, and the HuggingFace team
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,23 +12,40 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch LXMERT model."""
+""" PyTorch LXMERT model."""
+
 
 import math
+import os
+import warnings
 from dataclasses import dataclass
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, SmoothL1Loss
 
-from ... import initialization as init
 from ...activations import ACT2FN, gelu
 from ...modeling_utils import PreTrainedModel
-from ...utils import ModelOutput, auto_docstring, logging
+from ...utils import (
+    ModelOutput,
+    add_code_sample_docstrings,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    logging,
+    replace_return_docstrings,
+)
 from .configuration_lxmert import LxmertConfig
 
 
 logger = logging.get_logger(__name__)
+
+_CHECKPOINT_FOR_DOC = "unc-nlp/lxmert-base-uncased"
+_CONFIG_FOR_DOC = "LxmertConfig"
+
+LXMERT_PRETRAINED_MODEL_ARCHIVE_LIST = [
+    "unc-nlp/lxmert-base-uncased",
+]
 
 
 class GeLU(nn.Module):
@@ -38,142 +56,217 @@ class GeLU(nn.Module):
         return gelu(x)
 
 
-@auto_docstring(
-    custom_intro="""
+@dataclass
+class LxmertModelOutput(ModelOutput):
+    """
     Lxmert's outputs that contain the last hidden states, pooled outputs, and attention probabilities for the language,
     visual, and, cross-modality encoders. (note: the visual encoder in Lxmert is referred to as the "relation-ship"
     encoder")
-    """
-)
-@dataclass
-class LxmertModelOutput(ModelOutput):
-    r"""
-    language_output (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-        Sequence of hidden-states at the output of the last layer of the language encoder.
-    vision_output (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-        Sequence of hidden-states at the output of the last layer of the visual encoder.
-    pooled_output (`torch.FloatTensor` of shape `(batch_size, hidden_size)`):
-        Last layer hidden-state of the first token of the sequence (classification, CLS, token) further processed
-        by a Linear layer and a Tanh activation function. The Linear
-    language_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-        Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
-        shape `(batch_size, sequence_length, hidden_size)`.
-    vision_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-        Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
-        shape `(batch_size, sequence_length, hidden_size)`.
-    language_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    vision_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    cross_encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    """
-
-    language_output: torch.FloatTensor | None = None
-    vision_output: torch.FloatTensor | None = None
-    pooled_output: torch.FloatTensor | None = None
-    language_hidden_states: tuple[torch.FloatTensor] | None = None
-    vision_hidden_states: tuple[torch.FloatTensor] | None = None
-    language_attentions: tuple[torch.FloatTensor] | None = None
-    vision_attentions: tuple[torch.FloatTensor] | None = None
-    cross_encoder_attentions: tuple[torch.FloatTensor] | None = None
 
 
-@auto_docstring(
-    custom_intro="""
-    Output type of [`LxmertForQuestionAnswering`].
+    Args:
+        language_output (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the language encoder.
+        vision_output (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the visual encoder.
+        pooled_output (`torch.FloatTensor` of shape `(batch_size, hidden_size)`):
+            Last layer hidden-state of the first token of the sequence (classification, CLS, token) further processed
+            by a Linear layer and a Tanh activation function. The Linear
+        language_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        vision_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        language_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+        vision_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+        cross_encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
     """
-)
+
+    language_output: Optional[torch.FloatTensor] = None
+    vision_output: Optional[torch.FloatTensor] = None
+    pooled_output: Optional[torch.FloatTensor] = None
+    language_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    vision_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    language_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    vision_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+
 @dataclass
 class LxmertForQuestionAnsweringOutput(ModelOutput):
-    r"""
-    loss (*optional*, returned when `labels` is provided, `torch.FloatTensor` of shape `(1,)`):
-        Total loss as the sum of the masked language modeling loss and the next sequence prediction
-        (classification) loss.k.
-    question_answering_score (`torch.FloatTensor` of shape `(batch_size, n_qa_answers)`, *optional*):
-        Prediction scores of question answering objective (classification).
-    language_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-        Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
-        shape `(batch_size, sequence_length, hidden_size)`.
-    vision_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-        Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
-        shape `(batch_size, sequence_length, hidden_size)`.
-    language_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    vision_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    cross_encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
+    """
+    Output type of [`LxmertForQuestionAnswering`].
+
+    Args:
+        loss (*optional*, returned when `labels` is provided, `torch.FloatTensor` of shape `(1,)`):
+            Total loss as the sum of the masked language modeling loss and the next sequence prediction
+            (classification) loss.k.
+        question_answering_score (`torch.FloatTensor` of shape `(batch_size, n_qa_answers)`, *optional*):
+            Prediction scores of question answering objective (classification).
+        language_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        vision_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        language_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+        vision_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+        cross_encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
     """
 
-    loss: torch.FloatTensor | None = None
-    question_answering_score: torch.FloatTensor | None = None
-    language_hidden_states: tuple[torch.FloatTensor] | None = None
-    vision_hidden_states: tuple[torch.FloatTensor] | None = None
-    language_attentions: tuple[torch.FloatTensor] | None = None
-    vision_attentions: tuple[torch.FloatTensor] | None = None
-    cross_encoder_attentions: tuple[torch.FloatTensor] | None = None
+    loss: Optional[torch.FloatTensor] = None
+    question_answering_score: Optional[torch.FloatTensor] = None
+    language_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    vision_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    language_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    vision_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
-@auto_docstring(
-    custom_intro="""
-    Output type of [`LxmertForPreTraining`].
-    """
-)
 @dataclass
 class LxmertForPreTrainingOutput(ModelOutput):
-    r"""
-    loss (*optional*, returned when `labels` is provided, `torch.FloatTensor` of shape `(1,)`):
-        Total loss as the sum of the masked language modeling loss and the next sequence prediction
-        (classification) loss.
-    prediction_logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-        Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-    cross_relationship_score (`torch.FloatTensor` of shape `(batch_size, 2)`):
-        Prediction scores of the textual matching objective (classification) head (scores of True/False
-        continuation before SoftMax).
-    question_answering_score (`torch.FloatTensor` of shape `(batch_size, n_qa_answers)`):
-        Prediction scores of question answering objective (classification).
-    language_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-        Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
-        shape `(batch_size, sequence_length, hidden_size)`.
-    vision_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-        Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
-        shape `(batch_size, sequence_length, hidden_size)`.
-    language_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    vision_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
-    cross_encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-        Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-        sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
-        the self-attention heads.
+    """
+    Output type of [`LxmertForPreTraining`].
+
+    Args:
+        loss (*optional*, returned when `labels` is provided, `torch.FloatTensor` of shape `(1,)`):
+            Total loss as the sum of the masked language modeling loss and the next sequence prediction
+            (classification) loss.
+        prediction_logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+        cross_relationship_score (`torch.FloatTensor` of shape `(batch_size, 2)`):
+            Prediction scores of the textual matching objective (classification) head (scores of True/False
+            continuation before SoftMax).
+        question_answering_score (`torch.FloatTensor` of shape `(batch_size, n_qa_answers)`):
+            Prediction scores of question answering objective (classification).
+        language_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        vision_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for input features + one for the output of each cross-modality layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        language_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+        vision_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+        cross_encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`. Attentions weights after the attention softmax, used to compute the weighted average in
+            the self-attention heads.
+
     """
 
-    loss: torch.FloatTensor | None = None
-    prediction_logits: torch.FloatTensor | None = None
-    cross_relationship_score: torch.FloatTensor | None = None
-    question_answering_score: torch.FloatTensor | None = None
-    language_hidden_states: tuple[torch.FloatTensor] | None = None
-    vision_hidden_states: tuple[torch.FloatTensor] | None = None
-    language_attentions: tuple[torch.FloatTensor] | None = None
-    vision_attentions: tuple[torch.FloatTensor] | None = None
-    cross_encoder_attentions: tuple[torch.FloatTensor] | None = None
+    loss: Optional[torch.FloatTensor] = None
+    prediction_logits: Optional[torch.FloatTensor] = None
+    cross_relationship_score: Optional[torch.FloatTensor] = None
+    question_answering_score: Optional[torch.FloatTensor] = None
+    language_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    vision_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    language_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    vision_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+
+
+def load_tf_weights_in_lxmert(model, config, tf_checkpoint_path):
+    """Load tf checkpoints in a pytorch model."""
+    try:
+        import re
+
+        import numpy as np
+        import tensorflow as tf
+    except ImportError:
+        logger.error(
+            "Loading a TensorFlow model in PyTorch, requires TensorFlow to be installed. Please see "
+            "https://www.tensorflow.org/install/ for installation instructions."
+        )
+        raise
+    tf_path = os.path.abspath(tf_checkpoint_path)
+    logger.info(f"Converting TensorFlow checkpoint from {tf_path}")
+    # Load weights from TF model
+    init_vars = tf.train.list_variables(tf_path)
+    names = []
+    arrays = []
+    for name, shape in init_vars:
+        logger.info(f"Loading TF weight {name} with shape {shape}")
+        array = tf.train.load_variable(tf_path, name)
+        names.append(name)
+        arrays.append(array)
+
+    for name, array in zip(names, arrays):
+        name = name.split("/")
+        # adam_v and adam_m are variables used in AdamWeightDecayOptimizer to calculated m and v
+        # which are not required for using pretrained model
+        if any(
+            n
+            in [
+                "adam_v",
+                "adam_m",
+                "AdamWeightDecayOptimizer",
+                "AdamWeightDecayOptimizer_1",
+                "global_step",
+            ]
+            for n in name
+        ):
+            logger.info(f"Skipping {'/'.join(name)}")
+            continue
+        pointer = model
+        for m_name in name:
+            if re.fullmatch(r"[A-Za-z]+_\d+", m_name):
+                scope_names = re.split(r"_(\d+)", m_name)
+            else:
+                scope_names = [m_name]
+            if scope_names[0] == "kernel" or scope_names[0] == "gamma":
+                pointer = getattr(pointer, "weight")
+            elif scope_names[0] == "output_bias" or scope_names[0] == "beta":
+                pointer = getattr(pointer, "bias")
+            elif scope_names[0] == "output_weights":
+                pointer = getattr(pointer, "weight")
+            elif scope_names[0] == "squad":
+                pointer = getattr(pointer, "classifier")
+            else:
+                try:
+                    pointer = getattr(pointer, scope_names[0])
+                except AttributeError:
+                    logger.info(f"Skipping {'/'.join(name)}")
+                    continue
+            if len(scope_names) >= 2:
+                num = int(scope_names[1])
+                pointer = pointer[num]
+        if m_name[-11:] == "_embeddings":
+            pointer = getattr(pointer, "weight")
+        elif m_name == "kernel":
+            array = np.transpose(array)
+        try:
+            assert pointer.shape == array.shape
+        except AssertionError as e:
+            e.args += (pointer.shape, array.shape)
+            raise
+        logger.info(f"Initialize PyTorch weight {name}")
+        pointer.data = torch.from_numpy(array)
+    return model
 
 
 class LxmertEmbeddings(nn.Module):
@@ -185,6 +278,8 @@ class LxmertEmbeddings(nn.Module):
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size, padding_idx=0)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size, padding_idx=0)
 
+        # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
+        # any TensorFlow checkpoint file
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
@@ -235,13 +330,22 @@ class LxmertAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (
+            self.num_attention_heads,
+            self.attention_head_size,
+        )
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
     def forward(self, hidden_states, context, attention_mask=None, output_attentions=False):
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.attention_head_size)
-        query_layer = self.query(hidden_states).view(hidden_shape).transpose(1, 2)
-        kv_shape = (*context.shape[:-1], -1, self.attention_head_size)
-        key_layer = self.key(context).view(kv_shape).transpose(1, 2)
-        value_layer = self.value(context).view(kv_shape).transpose(1, 2)
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(context)
+        mixed_value_layer = self.value(context)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
@@ -559,7 +663,7 @@ class LxmertEncoder(nn.Module):
 
 class LxmertPooler(nn.Module):
     def __init__(self, config):
-        super().__init__()
+        super(LxmertPooler, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
@@ -574,7 +678,7 @@ class LxmertPooler(nn.Module):
 
 class LxmertPredictionHeadTransform(nn.Module):
     def __init__(self, config):
-        super().__init__()
+        super(LxmertPredictionHeadTransform, self).__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.transform_act_fn = ACT2FN[config.hidden_act]
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
@@ -587,11 +691,19 @@ class LxmertPredictionHeadTransform(nn.Module):
 
 
 class LxmertLMPredictionHead(nn.Module):
-    def __init__(self, config):
-        super().__init__()
+    def __init__(self, config, lxmert_model_embedding_weights):
+        super(LxmertLMPredictionHead, self).__init__()
         self.transform = LxmertPredictionHeadTransform(config)
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+
+        # The output weights are the same as the input embeddings, but there is
+        # an output-only bias for each token.
+        self.decoder = nn.Linear(
+            lxmert_model_embedding_weights.size(1),
+            lxmert_model_embedding_weights.size(0),
+            bias=False,
+        )
+        self.decoder.weight = lxmert_model_embedding_weights
+        self.bias = nn.Parameter(torch.zeros(lxmert_model_embedding_weights.size(0)))
 
     def forward(self, hidden_states):
         hidden_states = self.transform(hidden_states)
@@ -646,9 +758,9 @@ class LxmertVisualObjHead(nn.Module):
 
 
 class LxmertPreTrainingHeads(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.predictions = LxmertLMPredictionHead(config)
+    def __init__(self, config, lxmert_model_embedding_weights):
+        super(LxmertPreTrainingHeads, self).__init__()
+        self.predictions = LxmertLMPredictionHead(config, lxmert_model_embedding_weights)
         self.seq_relationship = nn.Linear(config.hidden_size, 2)
 
     def forward(self, sequence_output, pooled_output):
@@ -657,21 +769,117 @@ class LxmertPreTrainingHeads(nn.Module):
         return prediction_scores, seq_relationship_score
 
 
-@auto_docstring
 class LxmertPreTrainedModel(PreTrainedModel):
-    config: LxmertConfig
-    base_model_prefix = "lxmert"
-    input_modalities = ("image", "text")
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
 
-    @torch.no_grad()
+    config_class = LxmertConfig
+    load_tf_weights = load_tf_weights_in_lxmert
+    base_model_prefix = "lxmert"
+
     def _init_weights(self, module):
         """Initialize the weights"""
-        super()._init_weights(module)
-        if isinstance(module, LxmertLMPredictionHead):
-            init.zeros_(module.bias)
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
 
-@auto_docstring
+LXMERT_START_DOCSTRING = r"""
+
+    The LXMERT model was proposed in [LXMERT: Learning Cross-Modality Encoder Representations from
+    Transformers](https://arxiv.org/abs/1908.07490) by Hao Tan and Mohit Bansal. It's a vision and language transformer
+    model, pretrained on a variety of multi-modal datasets comprising of GQA, VQAv2.0, MSCOCO captions, and Visual
+    genome, using a combination of masked language modeling, region of interest feature regression, cross entropy loss
+    for question answering attribute prediction, and object tag prediction.
+
+    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
+    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
+    etc.)
+
+    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
+    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
+    and behavior.
+
+    Parameters:
+        config ([`LxmertConfig`]): Model configuration class with all the parameters of the model.
+            Initializing with a config file does not load the weights associated with the model, only the
+            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
+"""
+
+LXMERT_INPUTS_DOCSTRING = r"""
+
+    Args:
+        input_ids (`torch.LongTensor` of shape `({0})`):
+            Indices of input sequence tokens in the vocabulary.
+
+            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            [`PreTrainedTokenizer.__call__`] for details.
+
+            [What are input IDs?](../glossary#input-ids)
+        visual_feats (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_feat_dim)`):
+            This input represents visual features. They ROI pooled object features from bounding boxes using a
+            faster-RCNN model)
+
+            These are currently not provided by the transformers library.
+        visual_pos (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_pos_dim)`):
+            This input represents spacial features corresponding to their relative (via index) visual features. The
+            pre-trained LXMERT model expects these spacial features to be normalized bounding boxes on a scale of 0 to
+            1.
+
+            These are currently not provided by the transformers library.
+        attention_mask (`torch.FloatTensor` of shape `({0})`, *optional*):
+            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+
+            [What are attention masks?](../glossary#attention-mask)
+        visual_attention_mask (`torch.FloatTensor` of shape `({0})`, *optional*):
+            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+
+            [What are attention masks?](../glossary#attention-mask)
+        token_type_ids (`torch.LongTensor` of shape `({0})`, *optional*):
+            Segment token indices to indicate first and second portions of the inputs. Indices are selected in `[0,
+            1]`:
+
+            - 0 corresponds to a *sentence A* token,
+            - 1 corresponds to a *sentence B* token.
+
+            [What are token type IDs?](../glossary#token-type-ids)
+        inputs_embeds (`torch.FloatTensor` of shape `({0}, hidden_size)`, *optional*):
+            Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This
+            is useful if you want more control over how to convert `input_ids` indices into associated vectors than the
+            model's internal embedding lookup matrix.
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+            tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+            more detail.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+"""
+
+
+@add_start_docstrings(
+    "The bare Lxmert Model transformer outputting raw hidden-states without any specific head on top.",
+    LXMERT_START_DOCSTRING,
+)
 class LxmertModel(LxmertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -687,46 +895,30 @@ class LxmertModel(LxmertPreTrainedModel):
     def set_input_embeddings(self, new_embeddings):
         self.embeddings.word_embeddings = new_embeddings
 
-    @auto_docstring
+    @add_start_docstrings_to_model_forward(LXMERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=LxmertModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
-        visual_feats: torch.FloatTensor | None = None,
-        visual_pos: torch.FloatTensor | None = None,
-        attention_mask: torch.FloatTensor | None = None,
-        visual_attention_mask: torch.FloatTensor | None = None,
-        token_type_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> LxmertModelOutput | tuple[torch.FloatTensor]:
-        r"""
-        visual_feats (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_feat_dim)`):
-            This input represents visual features. They ROI pooled object features from bounding boxes using a
-            faster-RCNN model)
-
-            These are currently not provided by the transformers library.
-        visual_pos (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_pos_dim)`):
-            This input represents spatial features corresponding to their relative (via index) visual features. The
-            pre-trained LXMERT model expects these spatial features to be normalized bounding boxes on a scale of 0 to
-            1.
-
-            These are currently not provided by the transformers library.
-        visual_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-        """
+        input_ids: Optional[torch.LongTensor] = None,
+        visual_feats: Optional[torch.FloatTensor] = None,
+        visual_pos: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        visual_attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[LxmertModelOutput, Tuple[torch.FloatTensor]]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -822,12 +1014,12 @@ class LxmertModel(LxmertPreTrainedModel):
         )
 
 
-@auto_docstring
+@add_start_docstrings(
+    """Lxmert Model with a specified pretraining head on top.""",
+    LXMERT_START_DOCSTRING,
+)
 class LxmertForPreTraining(LxmertPreTrainedModel):
-    # help saving them
-    _tied_weights_keys = {
-        "cls.predictions.decoder.weight": "lxmert.embeddings.word_embeddings.weight",
-    }
+    _tied_weights_keys = ["cls.predictions.decoder.weight"]
 
     def __init__(self, config):
         super().__init__(config)
@@ -846,7 +1038,7 @@ class LxmertForPreTraining(LxmertPreTrainedModel):
         self.lxmert = LxmertModel(config)
 
         # Pre-training heads
-        self.cls = LxmertPreTrainingHeads(config)
+        self.cls = LxmertPreTrainingHeads(config, self.lxmert.embeddings.word_embeddings.weight)
         if self.task_obj_predict:
             self.obj_predict_head = LxmertVisualObjHead(config)
         if self.task_qa:
@@ -883,24 +1075,6 @@ class LxmertForPreTraining(LxmertPreTrainedModel):
                 "loss": "l2",
             }
         self.visual_losses = visual_losses
-
-    def resize_token_embeddings(
-        self, new_num_tokens: int, pad_to_multiple_of: int | None = None, mean_resizing: bool = True
-    ) -> nn.Embedding:
-        # Adding the following steps to resize bias to match the shape of resized embeddings
-        new_embeddings = super().resize_token_embeddings(new_num_tokens, pad_to_multiple_of, mean_resizing)
-        self.cls.predictions.bias = self._resize_bias(self.cls.predictions.bias, new_num_tokens)
-        return new_embeddings
-
-    def _resize_bias(self, bias, new_num_tokens: int):
-        old_num_tokens = bias.shape[0]
-        if new_num_tokens <= old_num_tokens:
-            new_bias = bias[:new_num_tokens]
-        else:
-            extra_bias = torch.zeros(new_num_tokens - old_num_tokens, device=bias.device)
-            new_bias = torch.cat([bias, extra_bias])
-        new_bias = nn.Parameter(new_bias)
-        return new_bias
 
     def resize_num_qa_labels(self, num_labels):
         """
@@ -973,49 +1147,32 @@ class LxmertForPreTraining(LxmertPreTrainedModel):
 
         return new_qa_logit_layer
 
-    @auto_docstring
+    @add_start_docstrings_to_model_forward(LXMERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @replace_return_docstrings(output_type=LxmertForPreTrainingOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
-        visual_feats: torch.FloatTensor | None = None,
-        visual_pos: torch.FloatTensor | None = None,
-        attention_mask: torch.FloatTensor | None = None,
-        visual_attention_mask: torch.FloatTensor | None = None,
-        token_type_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.LongTensor | None = None,
-        obj_labels: dict[str, tuple[torch.FloatTensor, torch.FloatTensor]] | None = None,
-        matched_label: torch.LongTensor | None = None,
-        ans: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
+        input_ids: Optional[torch.LongTensor] = None,
+        visual_feats: Optional[torch.FloatTensor] = None,
+        visual_pos: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        visual_attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        obj_labels: Optional[Dict[str, Tuple[torch.FloatTensor, torch.FloatTensor]]] = None,
+        matched_label: Optional[torch.LongTensor] = None,
+        ans: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
         **kwargs,
-    ) -> LxmertForPreTrainingOutput | tuple[torch.FloatTensor]:
+    ) -> Union[LxmertForPreTrainingOutput, Tuple[torch.FloatTensor]]:
         r"""
-        visual_feats (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_feat_dim)`):
-            This input represents visual features. They ROI pooled object features from bounding boxes using a
-            faster-RCNN model)
-
-            These are currently not provided by the transformers library.
-        visual_pos (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_pos_dim)`):
-            This input represents spatial features corresponding to their relative (via index) visual features. The
-            pre-trained LXMERT model expects these spatial features to be normalized bounding boxes on a scale of 0 to
-            1.
-
-            These are currently not provided by the transformers library.
-        visual_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ...,
             config.vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are ignored (masked), the
             loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`
-        obj_labels (`dict[Str: tuple[Torch.FloatTensor, Torch.FloatTensor]]`, *optional*):
+        obj_labels (`Dict[Str: Tuple[Torch.FloatTensor, Torch.FloatTensor]]`, *optional*):
             each key is named after each one of the visual losses and each element of the tuple is of the shape
             `(batch_size, num_features)` and `(batch_size, num_features, visual_feature_dim)` for each the label id and
             the label score respectively
@@ -1027,9 +1184,19 @@ class LxmertForPreTraining(LxmertPreTrainedModel):
             - 1 indicates that the sentence does match the image.
         ans (`Torch.Tensor` of shape `(batch_size)`, *optional*):
             a one hot representation hof the correct answer *optional*
+
+        Returns:
         """
 
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        if "masked_lm_labels" in kwargs:
+            warnings.warn(
+                "The `masked_lm_labels` argument is deprecated and will be removed in a future version, use `labels`"
+                " instead.",
+                FutureWarning,
+            )
+            labels = kwargs.pop("masked_lm_labels")
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         device = input_ids.device if input_ids is not None else inputs_embeds.device
         lxmert_output = self.lxmert(
@@ -1115,10 +1282,9 @@ class LxmertForPreTraining(LxmertPreTrainedModel):
         )
 
 
-@auto_docstring(
-    custom_intro="""
-    Lxmert Model with a visual-answering head on top for downstream QA tasks
-    """
+@add_start_docstrings(
+    """Lxmert Model with a visual-answering head on top for downstream QA tasks""",
+    LXMERT_START_DOCSTRING,
 )
 class LxmertForQuestionAnswering(LxmertPreTrainedModel):
     def __init__(self, config):
@@ -1212,45 +1378,31 @@ class LxmertForQuestionAnswering(LxmertPreTrainedModel):
 
         return new_qa_logit_layer
 
-    @auto_docstring
+    @add_start_docstrings_to_model_forward(LXMERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=LxmertForQuestionAnsweringOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
-        visual_feats: torch.FloatTensor | None = None,
-        visual_pos: torch.FloatTensor | None = None,
-        attention_mask: torch.FloatTensor | None = None,
-        visual_attention_mask: torch.FloatTensor | None = None,
-        token_type_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> LxmertForQuestionAnsweringOutput | tuple[torch.FloatTensor]:
+        input_ids: Optional[torch.LongTensor] = None,
+        visual_feats: Optional[torch.FloatTensor] = None,
+        visual_pos: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        visual_attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[LxmertForQuestionAnsweringOutput, Tuple[torch.FloatTensor]]:
         r"""
-        visual_feats (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_feat_dim)`):
-            This input represents visual features. They ROI pooled object features from bounding boxes using a
-            faster-RCNN model)
-
-            These are currently not provided by the transformers library.
-        visual_pos (`torch.FloatTensor` of shape `(batch_size, num_visual_features, visual_pos_dim)`):
-            This input represents spatial features corresponding to their relative (via index) visual features. The
-            pre-trained LXMERT model expects these spatial features to be normalized bounding boxes on a scale of 0 to
-            1.
-
-            These are currently not provided by the transformers library.
-        visual_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
         labels (`Torch.Tensor` of shape `(batch_size)`, *optional*):
             A one-hot representation of the correct answer
         """
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         lxmert_output = self.lxmert(
             input_ids=input_ids,
@@ -1284,14 +1436,3 @@ class LxmertForQuestionAnswering(LxmertPreTrainedModel):
             vision_attentions=lxmert_output.vision_attentions,
             cross_encoder_attentions=lxmert_output.cross_encoder_attentions,
         )
-
-
-__all__ = [
-    "LxmertEncoder",
-    "LxmertForPreTraining",
-    "LxmertForQuestionAnswering",
-    "LxmertModel",
-    "LxmertPreTrainedModel",
-    "LxmertVisualFeatureEncoder",
-    "LxmertXLayer",
-]

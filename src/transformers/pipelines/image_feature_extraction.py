@@ -1,12 +1,10 @@
-from typing import Any, Union
+from typing import Dict
 
 from ..utils import add_end_docstrings, is_vision_available
 from .base import GenericTensor, Pipeline, build_pipeline_init_args
 
 
 if is_vision_available():
-    from PIL import Image
-
     from ..image_utils import load_image
 
 
@@ -32,7 +30,7 @@ class ImageFeatureExtractionPipeline(Pipeline):
 
     >>> extractor = pipeline(model="google/vit-base-patch16-224", task="image-feature-extraction")
     >>> result = extractor("https://huggingface.co/datasets/Narsil/image_dummy/raw/main/parrots.png", return_tensors=True)
-    >>> result.shape  # This is a tensor of shape [1, sequence_length, hidden_dimension] representing the input image.
+    >>> result.shape  # This is a tensor of shape [1, sequence_lenth, hidden_dimension] representing the input image.
     torch.Size([1, 197, 768])
     ```
 
@@ -44,11 +42,6 @@ class ImageFeatureExtractionPipeline(Pipeline):
     All vision models may be used for this pipeline. See a list of all models, including community-contributed models on
     [huggingface.co/models](https://huggingface.co/models).
     """
-
-    _load_processor = False
-    _load_image_processor = True
-    _load_feature_extractor = False
-    _load_tokenizer = False
 
     def _sanitize_parameters(self, image_processor_kwargs=None, return_tensors=None, pool=None, **kwargs):
         preprocess_params = {} if image_processor_kwargs is None else image_processor_kwargs
@@ -64,10 +57,9 @@ class ImageFeatureExtractionPipeline(Pipeline):
 
         return preprocess_params, {}, postprocess_params
 
-    def preprocess(self, image, timeout=None, **image_processor_kwargs) -> dict[str, GenericTensor]:
+    def preprocess(self, image, timeout=None, **image_processor_kwargs) -> Dict[str, GenericTensor]:
         image = load_image(image, timeout=timeout)
-        model_inputs = self.image_processor(image, return_tensors="pt", **image_processor_kwargs)
-        model_inputs = model_inputs.to(self.dtype)
+        model_inputs = self.image_processor(image, return_tensors=self.framework, **image_processor_kwargs)
         return model_inputs
 
     def _forward(self, model_inputs):
@@ -89,14 +81,17 @@ class ImageFeatureExtractionPipeline(Pipeline):
 
         if return_tensors:
             return outputs
-        return outputs.tolist()
+        if self.framework == "pt":
+            return outputs.tolist()
+        elif self.framework == "tf":
+            return outputs.numpy().tolist()
 
-    def __call__(self, *args: Union[str, "Image.Image", list["Image.Image"], list[str]], **kwargs: Any) -> list[Any]:
+    def __call__(self, *args, **kwargs):
         """
         Extract the features of the input(s).
 
         Args:
-            images (`str`, `list[str]`, `PIL.Image` or `list[PIL.Image]`):
+            images (`str`, `List[str]`, `PIL.Image` or `List[PIL.Image]`):
                 The pipeline handles three types of images:
 
                 - A string containing a http link pointing to an image

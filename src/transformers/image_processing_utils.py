@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,419 +13,552 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
-from collections.abc import Iterable
-from copy import deepcopy
-from functools import partial
-from typing import Any
+import copy
+import json
+import os
+import warnings
+from io import BytesIO
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
-from huggingface_hub.dataclasses import validate_typed_dict
+import requests
 
-from .image_processing_base import BatchFeature, ImageProcessingMixin
+from .dynamic_module_utils import custom_object_save
+from .feature_extraction_utils import BatchFeature as BaseBatchFeature
 from .image_transforms import center_crop, normalize, rescale
-from .image_utils import (
-    ChannelDimension,
-    ImageInput,
-    SizeDict,
-    get_image_size,
-    make_flat_list_of_images,
-    validate_preprocess_arguments,
-)
-from .processing_utils import ImagesKwargs, Unpack
+from .image_utils import ChannelDimension
 from .utils import (
-    auto_docstring,
-    is_torchvision_available,
+    IMAGE_PROCESSOR_NAME,
+    PushToHubMixin,
+    add_model_info_to_auto_map,
+    cached_file,
+    copy_func,
+    download_url,
+    is_offline_mode,
+    is_remote_url,
     is_vision_available,
     logging,
 )
 
 
 if is_vision_available():
-    from .image_utils import PILImageResampling
-
-
-if is_torchvision_available():
-    from torchvision.transforms.v2 import functional as tvF
-
+    from PIL import Image
 
 logger = logging.get_logger(__name__)
 
 
-INIT_SERVICE_KWARGS = [
-    "processor_class",
-    "image_processor_type",
-]
+# TODO: Move BatchFeature to be imported by both image_processing_utils and image_processing_utils
+# We override the class string here, but logic is the same.
+class BatchFeature(BaseBatchFeature):
+    r"""
+    Holds the output of the image processor specific `__call__` methods.
+
+    This class is derived from a python dictionary and can be used as a dictionary.
+
+    Args:
+        data (`dict`):
+            Dictionary of lists/arrays/tensors returned by the __call__ method ('pixel_values', etc.).
+        tensor_type (`Union[None, str, TensorType]`, *optional*):
+            You can give a tensor_type here to convert the lists of integers in PyTorch/TensorFlow/Numpy Tensors at
+            initialization.
+    """
+
+
+# TODO: (Amy) - factor out the common parts of this and the feature extractor
+class ImageProcessingMixin(PushToHubMixin):
+    """
+    This is an image processor mixin used to provide saving/loading functionality for sequential and image feature
+    extractors.
+    """
+
+    _auto_class = None
+
+    def __init__(self, **kwargs):
+        """Set elements of `kwargs` as attributes."""
+        # This key was saved while we still used `XXXFeatureExtractor` for image processing. Now we use
+        # `XXXImageProcessor`, this attribute and its value are misleading.
+        kwargs.pop("feature_extractor_type", None)
+        # Pop "processor_class" as it should be saved as private attribute
+        self._processor_class = kwargs.pop("processor_class", None)
+        # Additional attributes without default values
+        for key, value in kwargs.items():
+            try:
+                setattr(self, key, value)
+            except AttributeError as err:
+                logger.error(f"Can't set {key} with value {value} for {self}")
+                raise err
+
+    def _set_processor_class(self, processor_class: str):
+        """Sets processor class as an attribute."""
+        self._processor_class = processor_class
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: Union[str, os.PathLike],
+        cache_dir: Optional[Union[str, os.PathLike]] = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        token: Optional[Union[str, bool]] = None,
+        revision: str = "main",
+        **kwargs,
+    ):
+        r"""
+        Instantiate a type of [`~image_processing_utils.ImageProcessingMixin`] from an image processor.
+
+        Args:
+            pretrained_model_name_or_path (`str` or `os.PathLike`):
+                This can be either:
+
+                - a string, the *model id* of a pretrained image_processor hosted inside a model repo on
+                  huggingface.co.
+                - a path to a *directory* containing a image processor file saved using the
+                  [`~image_processing_utils.ImageProcessingMixin.save_pretrained`] method, e.g.,
+                  `./my_model_directory/`.
+                - a path or url to a saved image processor JSON *file*, e.g.,
+                  `./my_model_directory/preprocessor_config.json`.
+            cache_dir (`str` or `os.PathLike`, *optional*):
+                Path to a directory in which a downloaded pretrained model image processor should be cached if the
+                standard cache should not be used.
+            force_download (`bool`, *optional*, defaults to `False`):
+                Whether or not to force to (re-)download the image processor files and override the cached versions if
+                they exist.
+            resume_download (`bool`, *optional*, defaults to `False`):
+                Whether or not to delete incompletely received file. Attempts to resume the download if such a file
+                exists.
+            proxies (`Dict[str, str]`, *optional*):
+                A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
+                'http://hostname': 'foo.bar:4012'}.` The proxies are used on each request.
+            token (`str` or `bool`, *optional*):
+                The token to use as HTTP bearer authorization for remote files. If `True`, or not specified, will use
+                the token generated when running `huggingface-cli login` (stored in `~/.huggingface`).
+            revision (`str`, *optional*, defaults to `"main"`):
+                The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
+                git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
+                identifier allowed by git.
+
+
+                <Tip>
+
+                To test a pull request you made on the Hub, you can pass `revision="refs/pr/<pr_number>".
+
+                </Tip>
+
+            return_unused_kwargs (`bool`, *optional*, defaults to `False`):
+                If `False`, then this function returns just the final image processor object. If `True`, then this
+                functions returns a `Tuple(image_processor, unused_kwargs)` where *unused_kwargs* is a dictionary
+                consisting of the key/value pairs whose keys are not image processor attributes: i.e., the part of
+                `kwargs` which has not been used to update `image_processor` and is otherwise ignored.
+            subfolder (`str`, *optional*, defaults to `""`):
+                In case the relevant files are located inside a subfolder of the model repo on huggingface.co, you can
+                specify the folder name here.
+            kwargs (`Dict[str, Any]`, *optional*):
+                The values in kwargs of any keys which are image processor attributes will be used to override the
+                loaded values. Behavior concerning key/value pairs whose keys are *not* image processor attributes is
+                controlled by the `return_unused_kwargs` keyword parameter.
+
+        Returns:
+            A image processor of type [`~image_processing_utils.ImageProcessingMixin`].
+
+        Examples:
+
+        ```python
+        # We can't instantiate directly the base class *ImageProcessingMixin* so let's show the examples on a
+        # derived class: *CLIPImageProcessor*
+        image_processor = CLIPImageProcessor.from_pretrained(
+            "openai/clip-vit-base-patch32"
+        )  # Download image_processing_config from huggingface.co and cache.
+        image_processor = CLIPImageProcessor.from_pretrained(
+            "./test/saved_model/"
+        )  # E.g. image processor (or model) was saved using *save_pretrained('./test/saved_model/')*
+        image_processor = CLIPImageProcessor.from_pretrained("./test/saved_model/preprocessor_config.json")
+        image_processor = CLIPImageProcessor.from_pretrained(
+            "openai/clip-vit-base-patch32", do_normalize=False, foo=False
+        )
+        assert image_processor.do_normalize is False
+        image_processor, unused_kwargs = CLIPImageProcessor.from_pretrained(
+            "openai/clip-vit-base-patch32", do_normalize=False, foo=False, return_unused_kwargs=True
+        )
+        assert image_processor.do_normalize is False
+        assert unused_kwargs == {"foo": False}
+        ```"""
+        kwargs["cache_dir"] = cache_dir
+        kwargs["force_download"] = force_download
+        kwargs["local_files_only"] = local_files_only
+        kwargs["revision"] = revision
+
+        use_auth_token = kwargs.pop("use_auth_token", None)
+        if use_auth_token is not None:
+            warnings.warn(
+                "The `use_auth_token` argument is deprecated and will be removed in v5 of Transformers. Please use `token` instead.",
+                FutureWarning,
+            )
+            if token is not None:
+                raise ValueError(
+                    "`token` and `use_auth_token` are both specified. Please set only the argument `token`."
+                )
+            token = use_auth_token
+
+        if token is not None:
+            kwargs["token"] = token
+
+        image_processor_dict, kwargs = cls.get_image_processor_dict(pretrained_model_name_or_path, **kwargs)
+
+        return cls.from_dict(image_processor_dict, **kwargs)
+
+    def save_pretrained(self, save_directory: Union[str, os.PathLike], push_to_hub: bool = False, **kwargs):
+        """
+        Save an image processor object to the directory `save_directory`, so that it can be re-loaded using the
+        [`~image_processing_utils.ImageProcessingMixin.from_pretrained`] class method.
+
+        Args:
+            save_directory (`str` or `os.PathLike`):
+                Directory where the image processor JSON file will be saved (will be created if it does not exist).
+            push_to_hub (`bool`, *optional*, defaults to `False`):
+                Whether or not to push your model to the Hugging Face model hub after saving it. You can specify the
+                repository you want to push to with `repo_id` (will default to the name of `save_directory` in your
+                namespace).
+            kwargs (`Dict[str, Any]`, *optional*):
+                Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
+        """
+        use_auth_token = kwargs.pop("use_auth_token", None)
+
+        if use_auth_token is not None:
+            warnings.warn(
+                "The `use_auth_token` argument is deprecated and will be removed in v5 of Transformers. Please use `token` instead.",
+                FutureWarning,
+            )
+            if kwargs.get("token", None) is not None:
+                raise ValueError(
+                    "`token` and `use_auth_token` are both specified. Please set only the argument `token`."
+                )
+            kwargs["token"] = use_auth_token
+
+        if os.path.isfile(save_directory):
+            raise AssertionError(f"Provided path ({save_directory}) should be a directory, not a file")
+
+        os.makedirs(save_directory, exist_ok=True)
+
+        if push_to_hub:
+            commit_message = kwargs.pop("commit_message", None)
+            repo_id = kwargs.pop("repo_id", save_directory.split(os.path.sep)[-1])
+            repo_id = self._create_repo(repo_id, **kwargs)
+            files_timestamps = self._get_files_timestamps(save_directory)
+
+        # If we have a custom config, we copy the file defining it in the folder and set the attributes so it can be
+        # loaded from the Hub.
+        if self._auto_class is not None:
+            custom_object_save(self, save_directory, config=self)
+
+        # If we save using the predefined names, we can load using `from_pretrained`
+        output_image_processor_file = os.path.join(save_directory, IMAGE_PROCESSOR_NAME)
+
+        self.to_json_file(output_image_processor_file)
+        logger.info(f"Image processor saved in {output_image_processor_file}")
+
+        if push_to_hub:
+            self._upload_modified_files(
+                save_directory,
+                repo_id,
+                files_timestamps,
+                commit_message=commit_message,
+                token=kwargs.get("token"),
+            )
+
+        return [output_image_processor_file]
+
+    @classmethod
+    def get_image_processor_dict(
+        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        From a `pretrained_model_name_or_path`, resolve to a dictionary of parameters, to be used for instantiating a
+        image processor of type [`~image_processor_utils.ImageProcessingMixin`] using `from_dict`.
+
+        Parameters:
+            pretrained_model_name_or_path (`str` or `os.PathLike`):
+                The identifier of the pre-trained checkpoint from which we want the dictionary of parameters.
+            subfolder (`str`, *optional*, defaults to `""`):
+                In case the relevant files are located inside a subfolder of the model repo on huggingface.co, you can
+                specify the folder name here.
+
+        Returns:
+            `Tuple[Dict, Dict]`: The dictionary(ies) that will be used to instantiate the image processor object.
+        """
+        cache_dir = kwargs.pop("cache_dir", None)
+        force_download = kwargs.pop("force_download", False)
+        resume_download = kwargs.pop("resume_download", False)
+        proxies = kwargs.pop("proxies", None)
+        token = kwargs.pop("token", None)
+        use_auth_token = kwargs.pop("use_auth_token", None)
+        local_files_only = kwargs.pop("local_files_only", False)
+        revision = kwargs.pop("revision", None)
+        subfolder = kwargs.pop("subfolder", "")
+
+        from_pipeline = kwargs.pop("_from_pipeline", None)
+        from_auto_class = kwargs.pop("_from_auto", False)
+
+        if use_auth_token is not None:
+            warnings.warn(
+                "The `use_auth_token` argument is deprecated and will be removed in v5 of Transformers. Please use `token` instead.",
+                FutureWarning,
+            )
+            if token is not None:
+                raise ValueError(
+                    "`token` and `use_auth_token` are both specified. Please set only the argument `token`."
+                )
+            token = use_auth_token
+
+        user_agent = {"file_type": "image processor", "from_auto_class": from_auto_class}
+        if from_pipeline is not None:
+            user_agent["using_pipeline"] = from_pipeline
+
+        if is_offline_mode() and not local_files_only:
+            logger.info("Offline mode: forcing local_files_only=True")
+            local_files_only = True
+
+        pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+        is_local = os.path.isdir(pretrained_model_name_or_path)
+        if os.path.isdir(pretrained_model_name_or_path):
+            image_processor_file = os.path.join(pretrained_model_name_or_path, IMAGE_PROCESSOR_NAME)
+        if os.path.isfile(pretrained_model_name_or_path):
+            resolved_image_processor_file = pretrained_model_name_or_path
+            is_local = True
+        elif is_remote_url(pretrained_model_name_or_path):
+            image_processor_file = pretrained_model_name_or_path
+            resolved_image_processor_file = download_url(pretrained_model_name_or_path)
+        else:
+            image_processor_file = IMAGE_PROCESSOR_NAME
+            try:
+                # Load from local folder or from cache or download from model Hub and cache
+                resolved_image_processor_file = cached_file(
+                    pretrained_model_name_or_path,
+                    image_processor_file,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    proxies=proxies,
+                    resume_download=resume_download,
+                    local_files_only=local_files_only,
+                    token=token,
+                    user_agent=user_agent,
+                    revision=revision,
+                    subfolder=subfolder,
+                )
+            except EnvironmentError:
+                # Raise any environment error raise by `cached_file`. It will have a helpful error message adapted to
+                # the original exception.
+                raise
+            except Exception:
+                # For any other exception, we throw a generic error.
+                raise EnvironmentError(
+                    f"Can't load image processor for '{pretrained_model_name_or_path}'. If you were trying to load"
+                    " it from 'https://huggingface.co/models', make sure you don't have a local directory with the"
+                    f" same name. Otherwise, make sure '{pretrained_model_name_or_path}' is the correct path to a"
+                    f" directory containing a {IMAGE_PROCESSOR_NAME} file"
+                )
+
+        try:
+            # Load image_processor dict
+            with open(resolved_image_processor_file, "r", encoding="utf-8") as reader:
+                text = reader.read()
+            image_processor_dict = json.loads(text)
+
+        except json.JSONDecodeError:
+            raise EnvironmentError(
+                f"It looks like the config file at '{resolved_image_processor_file}' is not a valid JSON file."
+            )
+
+        if is_local:
+            logger.info(f"loading configuration file {resolved_image_processor_file}")
+        else:
+            logger.info(
+                f"loading configuration file {image_processor_file} from cache at {resolved_image_processor_file}"
+            )
+
+        if "auto_map" in image_processor_dict and not is_local:
+            image_processor_dict["auto_map"] = add_model_info_to_auto_map(
+                image_processor_dict["auto_map"], pretrained_model_name_or_path
+            )
+
+        return image_processor_dict, kwargs
+
+    @classmethod
+    def from_dict(cls, image_processor_dict: Dict[str, Any], **kwargs):
+        """
+        Instantiates a type of [`~image_processing_utils.ImageProcessingMixin`] from a Python dictionary of parameters.
+
+        Args:
+            image_processor_dict (`Dict[str, Any]`):
+                Dictionary that will be used to instantiate the image processor object. Such a dictionary can be
+                retrieved from a pretrained checkpoint by leveraging the
+                [`~image_processing_utils.ImageProcessingMixin.to_dict`] method.
+            kwargs (`Dict[str, Any]`):
+                Additional parameters from which to initialize the image processor object.
+
+        Returns:
+            [`~image_processing_utils.ImageProcessingMixin`]: The image processor object instantiated from those
+            parameters.
+        """
+        image_processor_dict = image_processor_dict.copy()
+        return_unused_kwargs = kwargs.pop("return_unused_kwargs", False)
+
+        # The `size` parameter is a dict and was previously an int or tuple in feature extractors.
+        # We set `size` here directly to the `image_processor_dict` so that it is converted to the appropriate
+        # dict within the image processor and isn't overwritten if `size` is passed in as a kwarg.
+        if "size" in kwargs and "size" in image_processor_dict:
+            image_processor_dict["size"] = kwargs.pop("size")
+        if "crop_size" in kwargs and "crop_size" in image_processor_dict:
+            image_processor_dict["crop_size"] = kwargs.pop("crop_size")
+
+        image_processor = cls(**image_processor_dict)
+
+        # Update image_processor with kwargs if needed
+        to_remove = []
+        for key, value in kwargs.items():
+            if hasattr(image_processor, key):
+                setattr(image_processor, key, value)
+                to_remove.append(key)
+        for key in to_remove:
+            kwargs.pop(key, None)
+
+        logger.info(f"Image processor {image_processor}")
+        if return_unused_kwargs:
+            return image_processor, kwargs
+        else:
+            return image_processor
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serializes this instance to a Python dictionary.
+
+        Returns:
+            `Dict[str, Any]`: Dictionary of all the attributes that make up this image processor instance.
+        """
+        output = copy.deepcopy(self.__dict__)
+        output["image_processor_type"] = self.__class__.__name__
+
+        return output
+
+    @classmethod
+    def from_json_file(cls, json_file: Union[str, os.PathLike]):
+        """
+        Instantiates a image processor of type [`~image_processing_utils.ImageProcessingMixin`] from the path to a JSON
+        file of parameters.
+
+        Args:
+            json_file (`str` or `os.PathLike`):
+                Path to the JSON file containing the parameters.
+
+        Returns:
+            A image processor of type [`~image_processing_utils.ImageProcessingMixin`]: The image_processor object
+            instantiated from that JSON file.
+        """
+        with open(json_file, "r", encoding="utf-8") as reader:
+            text = reader.read()
+        image_processor_dict = json.loads(text)
+        return cls(**image_processor_dict)
+
+    def to_json_string(self) -> str:
+        """
+        Serializes this instance to a JSON string.
+
+        Returns:
+            `str`: String containing all the attributes that make up this feature_extractor instance in JSON format.
+        """
+        dictionary = self.to_dict()
+
+        for key, value in dictionary.items():
+            if isinstance(value, np.ndarray):
+                dictionary[key] = value.tolist()
+
+        # make sure private name "_processor_class" is correctly
+        # saved as "processor_class"
+        _processor_class = dictionary.pop("_processor_class", None)
+        if _processor_class is not None:
+            dictionary["processor_class"] = _processor_class
+
+        return json.dumps(dictionary, indent=2, sort_keys=True) + "\n"
+
+    def to_json_file(self, json_file_path: Union[str, os.PathLike]):
+        """
+        Save this instance to a JSON file.
+
+        Args:
+            json_file_path (`str` or `os.PathLike`):
+                Path to the JSON file in which this image_processor instance's parameters will be saved.
+        """
+        with open(json_file_path, "w", encoding="utf-8") as writer:
+            writer.write(self.to_json_string())
+
+    def __repr__(self):
+        return f"{self.__class__.__name__} {self.to_json_string()}"
+
+    @classmethod
+    def register_for_auto_class(cls, auto_class="AutoImageProcessor"):
+        """
+        Register this class with a given auto class. This should only be used for custom image processors as the ones
+        in the library are already mapped with `AutoImageProcessor `.
+
+        <Tip warning={true}>
+
+        This API is experimental and may have some slight breaking changes in the next releases.
+
+        </Tip>
+
+        Args:
+            auto_class (`str` or `type`, *optional*, defaults to `"AutoImageProcessor "`):
+                The auto class to register this new image processor with.
+        """
+        if not isinstance(auto_class, str):
+            auto_class = auto_class.__name__
+
+        import transformers.models.auto as auto_module
+
+        if not hasattr(auto_module, auto_class):
+            raise ValueError(f"{auto_class} is not a valid auto class.")
+
+        cls._auto_class = auto_class
+
+    def fetch_images(self, image_url_or_urls: Union[str, List[str]]):
+        """
+        Convert a single or a list of urls into the corresponding `PIL.Image` objects.
+
+        If a single url is passed, the return value will be a single object. If a list is passed a list of objects is
+        returned.
+        """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0"
+                " Safari/537.36"
+            )
+        }
+        if isinstance(image_url_or_urls, list):
+            return [self.fetch_images(x) for x in image_url_or_urls]
+        elif isinstance(image_url_or_urls, str):
+            response = requests.get(image_url_or_urls, stream=True, headers=headers)
+            response.raise_for_status()
+            return Image.open(BytesIO(response.content))
+        else:
+            raise ValueError(f"only a single or a list of entries is supported but got type={type(image_url_or_urls)}")
 
 
 class BaseImageProcessor(ImageProcessingMixin):
-    r"""
-    Base class for image processors with an inheritance-based backend architecture.
-
-    This class defines the preprocessing pipeline: kwargs validation, input preparation, and dispatching to the
-    backend's `_preprocess` method. Backend subclasses (`TorchvisionBackend`, `PilBackend`) inherit from this class
-    and implement the actual image operations (resize, crop, rescale, normalize, etc.). Model-specific image
-    processors then inherit from the appropriate backend class.
-
-    Architecture Overview
-    ---------------------
-
-    The class hierarchy is:
-
-        BaseImageProcessor (this class)
-        ├── TorchvisionBackend    (GPU-accelerated, torch.Tensor)
-        │   └── ModelImageProcessor (e.g. LlavaNextImageProcessor)
-        └── PilBackend            (portable CPU, np.ndarray)
-            └── ModelImageProcessorPil (e.g. CLIPImageProcessorPil)
-
-    The preprocessing flow is:
-
-        __call__() → preprocess() → _preprocess_image_like_inputs() → _prepare_image_like_inputs()
-                                                                       (calls process_image per image)
-                                                                     → _preprocess()
-                                                                       (batch operations: resize, crop, etc.)
-
-    - `process_image`: Implemented by backends. Converts a single raw input (PIL, NumPy, or Tensor) to the
-      backend's working format (torch.Tensor or np.ndarray), handles RGB conversion and channel reordering.
-    - `_preprocess`: Implemented by backends. Performs the actual batch processing (resize, center crop, rescale,
-      normalize, pad) and returns a `BatchFeature`.
-
-    Basic Implementation
-    --------------------
-
-    For processors that only need standard operations (resize, center crop, rescale, normalize), inherit from
-    a backend and define class attributes:
-
-        from transformers.image_processing_backends import PilBackend
-
-        class MyImageProcessorPil(PilBackend):
-            resample = PILImageResampling.BILINEAR
-            image_mean = IMAGENET_DEFAULT_MEAN
-            image_std = IMAGENET_DEFAULT_STD
-            size = {"height": 224, "width": 224}
-            do_resize = True
-            do_rescale = True
-            do_normalize = True
-
-    The backend's `_preprocess` method handles the standard pipeline automatically.
-
-    Custom Processing
-    -----------------
-
-    For processors that need custom logic (e.g., patch-based processing, multiple input types), override
-    `_preprocess` in your model-specific processor. The `_preprocess` method receives already-prepared images
-    (converted to the backend format with channels-first ordering) and performs the actual processing:
-
-        class MyImageProcessor(TorchvisionBackend):
-            def _preprocess(self, images, do_resize, size, do_normalize, image_mean, image_std, **kwargs):
-                # Group images by shape for efficient batched operations
-                grouped_images, grouped_images_index = group_images_by_shape(images)
-                processed_groups = {}
-                for shape, stacked_images in grouped_images.items():
-                    if do_resize:
-                        stacked_images = self.resize(stacked_images, size=size)
-                    if do_normalize:
-                        stacked_images = self.normalize(stacked_images, mean=image_mean, std=image_std)
-                    processed_groups[shape] = stacked_images
-                processed_images = reorder_images(processed_groups, grouped_images_index)
-                return BatchFeature(data={"pixel_values": processed_images})
-
-    For processors handling multiple input types (e.g., images + segmentation maps), override
-    `_preprocess_image_like_inputs`:
-
-        def _preprocess_image_like_inputs(
-            self,
-            images: ImageInput,
-            segmentation_maps: ImageInput | None = None,
-            **kwargs,
-        ) -> BatchFeature:
-            images = self._prepare_image_like_inputs(images, **kwargs)
-            batch_feature = self._preprocess(images, **kwargs)
-
-            if segmentation_maps is not None:
-                maps = self._prepare_image_like_inputs(segmentation_maps, **kwargs)
-                batch_feature["labels"] = self._preprocess(maps, **kwargs).pixel_values
-
-            return batch_feature
-
-    Extending Backend Behavior
-    --------------------------
-
-    To customize operations for a specific backend, subclass the backend and override its methods:
-
-        from transformers.image_processing_backends import TorchvisionBackend, PilBackend
-
-        class MyTorchvisionProcessor(TorchvisionBackend):
-            def resize(self, image, size, **kwargs):
-                # Custom resize logic for torchvision
-                return super().resize(image, size, **kwargs)
-
-        class MyPilProcessor(PilBackend):
-            def resize(self, image, size, **kwargs):
-                # Custom resize logic for PIL
-                return super().resize(image, size, **kwargs)
-
-    Custom Parameters
-    -----------------
-
-    To add parameters beyond `ImagesKwargs`, create a custom kwargs class and set it as `valid_kwargs`:
-
-        class MyImageProcessorKwargs(ImagesKwargs):
-            custom_param: int | None = None
-
-        class MyImageProcessor(TorchvisionBackend):
-            valid_kwargs = MyImageProcessorKwargs
-            custom_param = 10  # default value
-
-    Key Notes
-    ---------
-
-    - Backend selection is done at the class level: inherit from `TorchvisionBackend` or `PilBackend`
-    - Backends receive images as `torch.Tensor` (Torchvision) or `np.ndarray` (PIL), always channels-first
-    - All images have channel dimension first during processing, regardless of backend
-    - Arguments not provided by users default to class attribute values
-    - Backend classes encapsulate backend-specific logic (resize, normalize, etc.) and can be overridden
-    """
-
-    valid_kwargs = ImagesKwargs
-
-    default_to_square = True
-    rescale_factor = 1 / 255
-    model_input_names = ["pixel_values"]
-
-    def __init__(self, **kwargs: Unpack[ImagesKwargs]):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # We don't call self._set_attributes in BaseImageProcessor for backward compatibility with remote code
-        # We call it instead in the backend subclasses' __init__ methods.
 
-    def _set_attributes(self, **kwargs):
-        """Resolve and set instance attributes from kwargs and class-level defaults for all valid kwargs."""
-        attributes = {}
-        for key in self.valid_kwargs.__annotations__:
-            kwarg = kwargs.pop(key, None)
-            if kwarg is not None:
-                attributes[key] = kwarg
-            else:
-                attributes[key] = deepcopy(getattr(self, key, None))
-        attributes = self._standardize_kwargs(**attributes)
-        for key, value in attributes.items():
-            setattr(self, key, value)
-
-        self._valid_kwargs_names = list(self.valid_kwargs.__annotations__.keys())
-
-    def __call__(self, images: ImageInput, *args, **kwargs: Unpack[ImagesKwargs]) -> BatchFeature:
+    def __call__(self, images, **kwargs) -> BatchFeature:
         """Preprocess an image or a batch of images."""
-        return self.preprocess(images, *args, **kwargs)
+        return self.preprocess(images, **kwargs)
 
-    def process_image(self, *args, **kwargs):
-        """
-        Process a single raw image into the backend's working format.
-
-        Implemented by backend subclasses (`TorchvisionBackend`, `PilBackend`). Converts a raw input
-        (PIL Image, NumPy array, or torch Tensor) to the backend's internal format (`torch.Tensor` for
-        Torchvision, `np.ndarray` for PIL), handles RGB conversion and ensures channels-first ordering.
-        """
-        raise NotImplementedError
-
-    def _preprocess(self, *args, **kwargs):
-        """
-        Perform the actual batch image preprocessing (resize, center crop, rescale, normalize, pad).
-
-        Implemented by backend subclasses (`TorchvisionBackend`, `PilBackend`). Receives a list of
-        already-prepared images (in the backend's format, channels-first) and applies the configured
-        preprocessing operations. Returns a `BatchFeature` with the processed pixel values.
-
-        Model-specific processors can override this method to implement custom preprocessing logic
-        (e.g., patch-based processing in LLaVA-NeXT).
-        """
-        raise NotImplementedError
-
-    def _prepare_images_structure(
-        self,
-        images: ImageInput,
-        expected_ndims: int = 3,
-    ) -> ImageInput:
-        """
-        Prepare the images structure for processing.
-
-        Args:
-            images (`ImageInput`):
-                The input images to process.
-
-        Returns:
-            `ImageInput`: The images with a valid nesting.
-        """
-        images = self.fetch_images(images)
-        return make_flat_list_of_images(images, expected_ndims=expected_ndims)
-
-    def _prepare_image_like_inputs(
-        self,
-        images: ImageInput,
-        *args,
-        expected_ndims: int = 3,
-        **kwargs: Unpack[ImagesKwargs],
-    ) -> list[Any]:
-        """
-        Prepare image-like inputs for processing by converting each image via `process_image`.
-
-        Flattens the input structure and applies `process_image` (implemented by the backend) to each
-        individual image, converting raw inputs (PIL, NumPy, Tensor) into the backend's working format
-        with channels-first ordering.
-
-        Args:
-            images (`ImageInput`):
-                The image-like inputs to process.
-            expected_ndims (`int`, *optional*, defaults to 3):
-                The expected number of dimensions for the images.
-
-        Returns:
-            `list[torch.Tensor]` or `list[np.ndarray]`: The prepared images in the backend's format,
-            with channels-first ordering.
-        """
-        images = self._prepare_images_structure(images, expected_ndims=expected_ndims)
-
-        process_image_partial = partial(self.process_image, *args, **kwargs)
-
-        has_nested_structure = len(images) > 0 and isinstance(images[0], list | tuple)
-
-        if has_nested_structure:
-            processed_images = [[process_image_partial(img) for img in nested_list] for nested_list in images]
-        else:
-            processed_images = [process_image_partial(img) for img in images]
-
-        return processed_images
-
-    def _preprocess_image_like_inputs(
-        self,
-        images: ImageInput,
-        *args,
-        **kwargs: Unpack[ImagesKwargs],
-    ) -> BatchFeature:
-        """
-        Preprocess image-like inputs by preparing them and dispatching to `_preprocess`.
-
-        This method first calls `_prepare_image_like_inputs` to convert raw inputs into the backend's
-        format, then calls `_preprocess` for the actual batch processing. Override this method in
-        model-specific processors that need to handle multiple image-like input types (e.g., images
-        and segmentation maps) or need custom orchestration of the preprocessing pipeline.
-        """
-        images = self._prepare_image_like_inputs(images, **kwargs)
-        return self._preprocess(images, *args, **kwargs)
-
-    def _standardize_kwargs(
-        self,
-        size: int | Iterable[int] | dict[str, int] | SizeDict | None = None,
-        crop_size: int | Iterable[int] | dict[str, int] | SizeDict | None = None,
-        pad_size: int | Iterable[int] | dict[str, int] | SizeDict | None = None,
-        default_to_square: bool | None = None,
-        image_mean: float | list[float] | None = None,
-        image_std: float | list[float] | None = None,
-        **kwargs,
-    ) -> dict:
-        """
-        Standardize kwargs to canonical format before validation.
-        Can be overridden by subclasses to customize the processing of kwargs.
-        """
-        if kwargs is None:
-            kwargs = {}
-        if size is not None and not isinstance(size, SizeDict):
-            size = SizeDict(**get_size_dict(size=size, default_to_square=default_to_square))
-        if crop_size is not None and not isinstance(crop_size, SizeDict):
-            crop_size = SizeDict(**get_size_dict(crop_size, param_name="crop_size"))
-        if pad_size is not None and not isinstance(pad_size, SizeDict):
-            pad_size = SizeDict(**get_size_dict(size=pad_size, param_name="pad_size"))
-        if isinstance(image_mean, list):
-            image_mean = tuple(image_mean)
-        if isinstance(image_std, list):
-            image_std = tuple(image_std)
-
-        kwargs["size"] = size
-        kwargs["crop_size"] = crop_size
-        kwargs["pad_size"] = pad_size
-        kwargs["image_mean"] = image_mean
-        kwargs["image_std"] = image_std
-
-        return kwargs
-
-    # Backwards compatibility for method that was renamed
-    _further_process_kwargs = _standardize_kwargs
-
-    def _validate_preprocess_kwargs(
-        self,
-        do_rescale: bool | None = None,
-        rescale_factor: float | None = None,
-        do_normalize: bool | None = None,
-        image_mean: float | tuple[float] | None = None,
-        image_std: float | tuple[float] | None = None,
-        do_resize: bool | None = None,
-        size: SizeDict | None = None,
-        do_center_crop: bool | None = None,
-        crop_size: SizeDict | None = None,
-        resample: "PILImageResampling | tvF.InterpolationMode | int | None" = None,
-        **kwargs,
-    ):
-        """
-        Validate the kwargs for the preprocess method.
-        """
-        validate_preprocess_arguments(
-            do_rescale=do_rescale,
-            rescale_factor=rescale_factor,
-            do_normalize=do_normalize,
-            image_mean=image_mean,
-            image_std=image_std,
-            do_center_crop=do_center_crop,
-            crop_size=crop_size,
-            do_resize=do_resize,
-            size=size,
-            resample=resample,
-        )
-
-    @auto_docstring
-    def preprocess(self, images: ImageInput, *args, **kwargs: Unpack[ImagesKwargs]) -> BatchFeature:
-        """
-        Preprocess an image or a batch of images.
-        """
-        # Perform type validation on received kwargs
-        validate_typed_dict(self.valid_kwargs, kwargs)
-
-        # Set default kwargs from self
-        for kwarg_name in self._valid_kwargs_names:
-            kwargs.setdefault(kwarg_name, getattr(self, kwarg_name, None))
-
-        # Update kwargs that need further processing before being validated
-        kwargs = self._standardize_kwargs(**kwargs)
-
-        # Validate kwargs
-        self._validate_preprocess_kwargs(**kwargs)
-
-        return self._preprocess_image_like_inputs(images, *args, **kwargs)
-
-    def to_dict(self) -> dict[str, Any]:
-        processor_dict = super().to_dict()
-
-        # Filter out None values that are class defaults
-        filtered_dict = {}
-        for key, value in processor_dict.items():
-            if isinstance(value, SizeDict):
-                value = dict(value)
-            if value is None:
-                class_default = getattr(type(self), key, "NOT_FOUND")
-                # Keep None if user explicitly set it (class default is non-None)
-                if class_default != "NOT_FOUND" and class_default is not None:
-                    filtered_dict[key] = value
-            else:
-                filtered_dict[key] = value
-
-        filtered_dict.pop("_valid_processor_keys", None)
-        filtered_dict.pop("_valid_kwargs_names", None)
-        return filtered_dict
+    def preprocess(self, images, **kwargs) -> BatchFeature:
+        raise NotImplementedError("Each image processor must implement its own preprocess method")
 
     def rescale(
         self,
         image: np.ndarray,
         scale: float,
-        data_format: str | ChannelDimension | None = None,
-        input_data_format: str | ChannelDimension | None = None,
+        data_format: Optional[Union[str, ChannelDimension]] = None,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
         **kwargs,
     ) -> np.ndarray:
         """
@@ -451,14 +585,13 @@ class BaseImageProcessor(ImageProcessingMixin):
         """
         return rescale(image, scale=scale, data_format=data_format, input_data_format=input_data_format, **kwargs)
 
-    # The next methods are kept for backwards compatibility with remote code, but are overriden by backends.
     def normalize(
         self,
         image: np.ndarray,
-        mean: float | Iterable[float],
-        std: float | Iterable[float],
-        data_format: str | ChannelDimension | None = None,
-        input_data_format: str | ChannelDimension | None = None,
+        mean: Union[float, Iterable[float]],
+        std: Union[float, Iterable[float]],
+        data_format: Optional[Union[str, ChannelDimension]] = None,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
         **kwargs,
     ) -> np.ndarray:
         """
@@ -492,9 +625,9 @@ class BaseImageProcessor(ImageProcessingMixin):
     def center_crop(
         self,
         image: np.ndarray,
-        size: dict[str, int],
-        data_format: str | ChannelDimension | None = None,
-        input_data_format: str | ChannelDimension | None = None,
+        size: Dict[str, int],
+        data_format: Optional[Union[str, ChannelDimension]] = None,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
         **kwargs,
     ) -> np.ndarray:
         """
@@ -504,7 +637,7 @@ class BaseImageProcessor(ImageProcessingMixin):
         Args:
             image (`np.ndarray`):
                 Image to center crop.
-            size (`dict[str, int]`):
+            size (`Dict[str, int]`):
                 Size of the output image.
             data_format (`str` or `ChannelDimension`, *optional*):
                 The channel dimension format for the output image. If unset, the channel dimension format of the input
@@ -529,13 +662,7 @@ class BaseImageProcessor(ImageProcessingMixin):
         )
 
 
-VALID_SIZE_DICT_KEYS = (
-    {"height", "width"},
-    {"shortest_edge"},
-    {"shortest_edge", "longest_edge"},
-    {"longest_edge"},
-    {"max_height", "max_width"},
-)
+VALID_SIZE_DICT_KEYS = ({"height", "width"}, {"shortest_edge"}, {"shortest_edge", "longest_edge"}, {"longest_edge"})
 
 
 def is_valid_size_dict(size_dict):
@@ -550,11 +677,8 @@ def is_valid_size_dict(size_dict):
 
 
 def convert_to_size_dict(
-    size: int | Iterable[int] | None = None,
-    max_size: int | None = None,
-    default_to_square: bool = True,
-    height_width_order: bool = True,
-) -> dict[str, int]:
+    size, max_size: Optional[int] = None, default_to_square: bool = True, height_width_order: bool = True
+):
     # By default, if size is an int we assume it represents a tuple of (size, size).
     if isinstance(size, int) and default_to_square:
         if max_size is not None:
@@ -581,8 +705,8 @@ def convert_to_size_dict(
 
 
 def get_size_dict(
-    size: int | Iterable[int] | dict[str, int] | SizeDict | None = None,
-    max_size: int | None = None,
+    size: Union[int, Iterable[int], Dict[str, int]] = None,
+    max_size: Optional[int] = None,
     height_width_order: bool = True,
     default_to_square: bool = True,
     param_name="size",
@@ -597,29 +721,23 @@ def get_size_dict(
     - If `size` is an int, and `default_to_square` is `True`, it is converted to `{"height": size, "width": size}`.
     - If `size` is an int and `default_to_square` is False, it is converted to `{"shortest_edge": size}`. If `max_size`
       is set, it is added to the dict as `{"longest_edge": max_size}`.
-    - If `size` is `None` and `default_to_square` is False, the result is `{"longest_edge": max_size}` (requires
-      `max_size` to be set). Tuple/list/SizeDict/dict `size` values do not use `max_size`.
 
     Args:
-        size (`int | Iterable[int] | dict[str, int] | SizeDict`, *optional*):
+        size (`Union[int, Iterable[int], Dict[str, int]]`, *optional*):
             The `size` parameter to be cast into a size dictionary.
-        max_size (`int | None`, *optional*):
-            With `default_to_square=False`, sets `longest_edge` when `size` is an int or `None`; unused for dict,
-            `SizeDict`, or tuple/list `size`. Raises if set with `default_to_square=True` when `size` is an int or `None`.
+        max_size (`Optional[int]`, *optional*):
+            The `max_size` parameter to be cast into a size dictionary.
         height_width_order (`bool`, *optional*, defaults to `True`):
             If `size` is a tuple, whether it's in (height, width) or (width, height) order.
         default_to_square (`bool`, *optional*, defaults to `True`):
             If `size` is an int, whether to default to a square image or not.
     """
-    if not isinstance(size, dict | SizeDict):
+    if not isinstance(size, dict):
         size_dict = convert_to_size_dict(size, max_size, default_to_square, height_width_order)
         logger.info(
-            f"{param_name} should be a dictionary with one of the following sets of keys: {VALID_SIZE_DICT_KEYS}, got {size}."
+            f"{param_name} should be a dictionary on of the following set of keys: {VALID_SIZE_DICT_KEYS}, got {size}."
             f" Converted to {size_dict}.",
         )
-    # Some remote code bypasses or overrides `_standardize_kwargs`, so handle `SizeDict` `size` here too.
-    elif isinstance(size, SizeDict):
-        size_dict = dict(size)
     else:
         size_dict = size
 
@@ -668,21 +786,8 @@ def select_best_resolution(original_size: tuple, possible_resolutions: list) -> 
     return best_fit
 
 
-def get_patch_output_size(image, target_resolution, input_data_format):
-    """
-    Given an image and a target resolution, calculate the output size of the image after cropping to the target
-    """
-    original_height, original_width = get_image_size(image, channel_dim=input_data_format)
-    target_height, target_width = target_resolution
-
-    scale_w = target_width / original_width
-    scale_h = target_height / original_height
-
-    if scale_w < scale_h:
-        new_width = target_width
-        new_height = min(math.ceil(original_height * scale_w), target_height)
-    else:
-        new_height = target_height
-        new_width = min(math.ceil(original_width * scale_h), target_width)
-
-    return new_height, new_width
+ImageProcessingMixin.push_to_hub = copy_func(ImageProcessingMixin.push_to_hub)
+if ImageProcessingMixin.push_to_hub.__doc__ is not None:
+    ImageProcessingMixin.push_to_hub.__doc__ = ImageProcessingMixin.push_to_hub.__doc__.format(
+        object="image processor", object_class="AutoImageProcessor", object_files="image processor file"
+    )

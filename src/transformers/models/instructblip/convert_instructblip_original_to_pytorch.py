@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,9 +19,8 @@ URL: https://github.com/salesforce/LAVIS/tree/main/projects/instructblip
 """
 
 import argparse
-from io import BytesIO
 
-import httpx
+import requests
 import torch
 
 # pip3 install salesforce-lavis
@@ -48,8 +48,7 @@ from transformers.utils.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 
 def load_demo_image():
     url = "https://raw.githubusercontent.com/salesforce/LAVIS/main/docs/_static/Confusing-Pictures.jpg"
-    with httpx.stream("GET", url) as response:
-        image = Image.open(BytesIO(response.read())).convert("RGB")
+    image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
 
     return image
 

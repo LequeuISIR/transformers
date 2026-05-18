@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,9 +15,8 @@
 
 import argparse
 import re
-from io import BytesIO
 
-import httpx
+import requests
 import torch
 
 # git clone https://github.com/salesforce/BLIP.git
@@ -37,9 +37,8 @@ from transformers import (
 
 
 def load_demo_image(image_size, device):
-    url = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg"
-    with httpx.stream("GET", url) as response:
-        raw_image = Image.open(BytesIO(response.read())).convert("RGB")
+    img_url = "https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg"
+    raw_image = Image.open(requests.get(img_url, stream=True).raw).convert("RGB")
 
     transform = transforms.Compose(
         [
@@ -189,4 +188,4 @@ if __name__ == "__main__":
     parser.add_argument("--config_path", default=None, type=str, help="Path to hf config.json of model to convert")
     args = parser.parse_args()
 
-    convert_blip_checkpoint(args.pytorch_dump_folder_path, args.config_path)
+    convert_blip_checkpoint(args.checkpoint_path, args.pytorch_dump_folder_path, args.config_path)

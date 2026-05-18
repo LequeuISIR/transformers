@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2024 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,37 +12,45 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tokenization class for SigLIP model."""
+""" Tokenization class for SigLIP model."""
 
 import os
 import re
 import string
 import warnings
 from shutil import copyfile
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import sentencepiece as spm
 
+from ...convert_slow_tokenizer import import_protobuf
+from ...tokenization_utils import PreTrainedTokenizer
 from ...tokenization_utils_base import AddedToken
-from ...tokenization_utils_sentencepiece import SentencePieceBackend
 
 
 if TYPE_CHECKING:
     from ...tokenization_utils_base import TextInput
 from ...utils import logging, requires_backends
-from ...utils.import_utils import requires
 
 
 logger = logging.get_logger(__name__)
 
 VOCAB_FILES_NAMES = {"vocab_file": "spiece.model"}
 
+PRETRAINED_VOCAB_FILES_MAP = {
+    "vocab_file": {
+        "google/siglip-base-patch16-224": "https://huggingface.co/google/siglip-base-patch16-224/resolve/main/spiece.model",
+    }
+}
+
+PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
+    "google/siglip-base-patch16-224": 256,
+}
 
 SPIECE_UNDERLINE = "▁"
 
 
-@requires(backends=("sentencepiece",))
-class SiglipTokenizer(SentencePieceBackend):
+class SiglipTokenizer(PreTrainedTokenizer):
     """
     Construct a Siglip tokenizer. Based on [SentencePiece](https://github.com/google/sentencepiece).
 
@@ -59,7 +68,7 @@ class SiglipTokenizer(SentencePieceBackend):
             token instead.
         pad_token (`str`, *optional*, defaults to `"</s>"`):
             The token used for padding, for example when batching sequences of different lengths.
-        additional_special_tokens (`list[str]`, *optional*):
+        additional_special_tokens (`List[str]`, *optional*):
             Additional special tokens used by the tokenizer.
         sp_model_kwargs (`dict`, *optional*):
             Will be passed to the `SentencePieceProcessor.__init__()` method. The [Python wrapper for
@@ -83,6 +92,8 @@ class SiglipTokenizer(SentencePieceBackend):
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
+    pretrained_vocab_files_map = PRETRAINED_VOCAB_FILES_MAP
+    max_model_input_sizes = PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES
     model_input_names = ["input_ids", "attention_mask"]
 
     def __init__(
@@ -92,7 +103,7 @@ class SiglipTokenizer(SentencePieceBackend):
         unk_token="<unk>",
         pad_token="</s>",
         additional_special_tokens=None,
-        sp_model_kwargs: dict[str, Any] | None = None,
+        sp_model_kwargs: Optional[Dict[str, Any]] = None,
         model_max_length=64,
         do_lower_case=True,
         **kwargs,
@@ -116,10 +127,14 @@ class SiglipTokenizer(SentencePieceBackend):
         )
 
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
+
         self.do_lower_case = do_lower_case
+        self.vocab_file = vocab_file
+
+        self.sp_model = self.get_spm_processor()
+        self.vocab_file = vocab_file
 
         super().__init__(
-            vocab_file=vocab_file,
             eos_token=eos_token,
             unk_token=unk_token,
             pad_token=pad_token,
@@ -130,32 +145,48 @@ class SiglipTokenizer(SentencePieceBackend):
             **kwargs,
         )
 
+    def get_spm_processor(self):
+        tokenizer = spm.SentencePieceProcessor(**self.sp_model_kwargs)
+        with open(self.vocab_file, "rb") as f:
+            sp_model = f.read()
+            model_pb2 = import_protobuf()
+            model = model_pb2.ModelProto.FromString(sp_model)
+            normalizer_spec = model_pb2.NormalizerSpec()
+            normalizer_spec.add_dummy_prefix = False
+            model.normalizer_spec.MergeFrom(normalizer_spec)
+            sp_model = model.SerializeToString()
+            tokenizer.LoadFromSerializedProto(sp_model)
+        return tokenizer
+
     @property
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.vocab_size
     def vocab_size(self):
         return self.sp_model.get_piece_size()
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.get_vocab
     def get_vocab(self):
         vocab = {self.convert_ids_to_tokens(i): i for i in range(self.vocab_size)}
         vocab.update(self.added_tokens_encoder)
         return vocab
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.get_special_tokens_mask
     def get_special_tokens_mask(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = None, already_has_special_tokens: bool = False
-    ) -> list[int]:
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None, already_has_special_tokens: bool = False
+    ) -> List[int]:
         """
         Retrieve sequence ids from a token list that has no special tokens added. This method is called when adding
         special tokens using the tokenizer `prepare_for_model` method.
 
         Args:
-            token_ids_0 (`list[int]`):
+            token_ids_0 (`List[int]`):
                 List of IDs.
-            token_ids_1 (`list[int]`, *optional*):
+            token_ids_1 (`List[int]`, *optional*):
                 Optional second list of IDs for sequence pairs.
             already_has_special_tokens (`bool`, *optional*, defaults to `False`):
                 Whether or not the token list is already formatted with special tokens for the model.
 
         Returns:
-            `list[int]`: A list of integers in the range [0, 1]: 1 for a special token, 0 for a sequence token.
+            `List[int]`: A list of integers in the range [0, 1]: 1 for a special token, 0 for a sequence token.
         """
         if already_has_special_tokens:
             return super().get_special_tokens_mask(
@@ -167,7 +198,8 @@ class SiglipTokenizer(SentencePieceBackend):
             return ([0] * len(token_ids_0)) + [1]
         return ([0] * len(token_ids_0)) + [1] + ([0] * len(token_ids_1)) + [1]
 
-    def _add_eos_if_not_present(self, token_ids: list[int]) -> list[int]:
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer._add_eos_if_not_present
+    def _add_eos_if_not_present(self, token_ids: List[int]) -> List[int]:
         """Do not add eos again if user already added it."""
         if len(token_ids) > 0 and token_ids[-1] == self.eos_token_id:
             warnings.warn(
@@ -178,21 +210,22 @@ class SiglipTokenizer(SentencePieceBackend):
         else:
             return token_ids + [self.eos_token_id]
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.create_token_type_ids_from_sequences
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = None
-    ) -> list[int]:
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+    ) -> List[int]:
         """
         Create a mask from the two sequences passed to be used in a sequence-pair classification task. T5 does not make
         use of token type ids, therefore a list of zeros is returned.
 
         Args:
-            token_ids_0 (`list[int]`):
+            token_ids_0 (`List[int]`):
                 List of IDs.
-            token_ids_1 (`list[int]`, *optional*):
+            token_ids_1 (`List[int]`, *optional*):
                 Optional second list of IDs for sequence pairs.
 
         Returns:
-            `list[int]`: List of zeros.
+            `List[int]`: List of zeros.
         """
         eos = [self.eos_token_id]
 
@@ -200,9 +233,10 @@ class SiglipTokenizer(SentencePieceBackend):
             return len(token_ids_0 + eos) * [0]
         return len(token_ids_0 + eos + token_ids_1 + eos) * [0]
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.build_inputs_with_special_tokens
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = None
-    ) -> list[int]:
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+    ) -> List[int]:
         """
         Build model inputs from a sequence or a pair of sequence for sequence classification tasks by concatenating and
         adding special tokens. A sequence has the following format:
@@ -211,13 +245,13 @@ class SiglipTokenizer(SentencePieceBackend):
         - pair of sequences: `A </s> B </s>`
 
         Args:
-            token_ids_0 (`list[int]`):
+            token_ids_0 (`List[int]`):
                 List of IDs to which the special tokens will be added.
-            token_ids_1 (`list[int]`, *optional*):
+            token_ids_1 (`List[int]`, *optional*):
                 Optional second list of IDs for sequence pairs.
 
         Returns:
-            `list[int]`: List of [input IDs](../glossary#input-ids) with the appropriate special tokens.
+            `List[int]`: List of [input IDs](../glossary#input-ids) with the appropriate special tokens.
         """
         token_ids_0 = self._add_eos_if_not_present(token_ids_0)
         if token_ids_1 is None:
@@ -226,11 +260,13 @@ class SiglipTokenizer(SentencePieceBackend):
             token_ids_1 = self._add_eos_if_not_present(token_ids_1)
             return token_ids_0 + token_ids_1
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.__getstate__
     def __getstate__(self):
         state = self.__dict__.copy()
         state["sp_model"] = None
         return state
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.__setstate__
     def __setstate__(self, d):
         self.__dict__ = d
 
@@ -255,9 +291,6 @@ class SiglipTokenizer(SentencePieceBackend):
                 If provided, then this exact string is kept. For example providing '{}' will keep any occurrences of '{}'
                 (but will still remove '{' and '}' that appear separately).
         """
-        if self.do_lower_case:
-            text = text.lower()
-
         if keep_punctuation_exact_string:
             text = keep_punctuation_exact_string.join(
                 self.remove_punctuation(part) for part in text.split(keep_punctuation_exact_string)
@@ -269,7 +302,7 @@ class SiglipTokenizer(SentencePieceBackend):
 
         return text
 
-    def tokenize(self, text: "TextInput", add_special_tokens=False, **kwargs) -> list[str]:
+    def tokenize(self, text: "TextInput", add_special_tokens=False, **kwargs) -> List[str]:
         """
         Converts a string to a list of tokens.
         """
@@ -280,6 +313,7 @@ class SiglipTokenizer(SentencePieceBackend):
         return tokens
 
     @property
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.unk_token_length
     def unk_token_length(self):
         return len(self.sp_model.encode(str(self.unk_token)))
 
@@ -303,10 +337,12 @@ class SiglipTokenizer(SentencePieceBackend):
         # 2. Remove self.unk_token from ['<','unk','>', '▁Hey']
         return tokens[self.unk_token_length :] if len(tokens) >= self.unk_token_length else tokens
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer._convert_token_to_id
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
         return self.sp_model.piece_to_id(token)
 
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer._convert_id_to_token
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
         token = self.sp_model.IdToPiece(index)
@@ -331,7 +367,8 @@ class SiglipTokenizer(SentencePieceBackend):
         out_string += self.sp_model.decode(current_sub_tokens)
         return out_string.strip()
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None) -> tuple[str]:
+    # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.save_vocabulary
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
         if not os.path.isdir(save_directory):
             logger.error(f"Vocabulary path ({save_directory}) should be a directory")
             return
@@ -347,6 +384,3 @@ class SiglipTokenizer(SentencePieceBackend):
                 fi.write(content_spiece_model)
 
         return (out_vocab_file,)
-
-
-__all__ = ["SiglipTokenizer"]

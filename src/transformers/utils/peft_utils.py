@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib
-import importlib.metadata
 import os
+from typing import Dict, Optional, Union
 
 from packaging import version
 
@@ -28,15 +28,16 @@ ADAPTER_SAFE_WEIGHTS_NAME = "adapter_model.safetensors"
 
 def find_adapter_config_file(
     model_id: str,
-    cache_dir: str | os.PathLike | None = None,
+    cache_dir: Optional[Union[str, os.PathLike]] = None,
     force_download: bool = False,
-    proxies: dict[str, str] | None = None,
-    token: bool | str | None = None,
-    revision: str | None = None,
+    resume_download: bool = False,
+    proxies: Optional[Dict[str, str]] = None,
+    token: Optional[Union[bool, str]] = None,
+    revision: Optional[str] = None,
     local_files_only: bool = False,
     subfolder: str = "",
-    _commit_hash: str | None = None,
-) -> str | None:
+    _commit_hash: Optional[str] = None,
+) -> Optional[str]:
     r"""
     Simply checks if the model stored on the Hub or locally is an adapter model or not, return the path of the adapter
     config file if it is, None otherwise.
@@ -50,12 +51,14 @@ def find_adapter_config_file(
         force_download (`bool`, *optional*, defaults to `False`):
             Whether or not to force to (re-)download the configuration files and override the cached versions if they
             exist.
-        proxies (`dict[str, str]`, *optional*):
+        resume_download (`bool`, *optional*, defaults to `False`):
+            Whether or not to delete incompletely received file. Attempts to resume the download if such a file exists.
+        proxies (`Dict[str, str]`, *optional*):
             A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
             'http://hostname': 'foo.bar:4012'}.` The proxies are used on each request.
         token (`str` or *bool*, *optional*):
             The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
-            when running `hf auth login` (stored in `~/.huggingface`).
+            when running `huggingface-cli login` (stored in `~/.huggingface`).
         revision (`str`, *optional*, defaults to `"main"`):
             The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
             git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
@@ -86,6 +89,7 @@ def find_adapter_config_file(
             ADAPTER_CONFIG_NAME,
             cache_dir=cache_dir,
             force_download=force_download,
+            resume_download=resume_download,
             proxies=proxies,
             token=token,
             revision=revision,
@@ -114,4 +118,7 @@ def check_peft_version(min_version: str) -> None:
     is_peft_version_compatible = version.parse(importlib.metadata.version("peft")) >= version.parse(min_version)
 
     if not is_peft_version_compatible:
-        raise ValueError(f"The version of PEFT you are using is not compatible, please use a version >= {min_version}")
+        raise ValueError(
+            f"The version of PEFT you are using is not compatible, please use a version that is greater"
+            f" than {min_version}"
+        )

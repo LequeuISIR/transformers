@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,12 +14,12 @@
 # limitations under the License.
 """Convert BiT checkpoints from the timm library."""
 
+
 import argparse
 import json
-from io import BytesIO
 from pathlib import Path
 
-import httpx
+import requests
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -75,9 +76,8 @@ def rename_key(name):
 # We will verify our results on an image of cute cats
 def prepare_img():
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    with httpx.stream("GET", url) as response:
-        image = Image.open(BytesIO(response.read()))
-    return image
+    im = Image.open(requests.get(url, stream=True).raw)
+    return im
 
 
 @torch.no_grad()
@@ -95,7 +95,7 @@ def convert_bit_checkpoint(model_name, pytorch_dump_folder_path, push_to_hub=Fal
 
     # load state_dict of original model
     state_dict = timm_model.state_dict()
-    for key in state_dict.copy():
+    for key in state_dict.copy().keys():
         val = state_dict.pop(key)
         state_dict[rename_key(key)] = val.squeeze() if "head" in key else val
 

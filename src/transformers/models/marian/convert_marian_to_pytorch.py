@@ -19,6 +19,7 @@ import socket
 import time
 import warnings
 from pathlib import Path
+from typing import Dict, List, Union
 from zipfile import ZipFile
 
 import numpy as np
@@ -60,14 +61,14 @@ def load_layers_(layer_lst: nn.ModuleList, opus_state: dict, converter, is_decod
         layer.load_state_dict(sd, strict=False)
 
 
-def find_pretrained_model(src_lang: str, tgt_lang: str) -> list[str]:
+def find_pretrained_model(src_lang: str, tgt_lang: str) -> List[str]:
     """Find models that can accept src_lang as input and return tgt_lang as output."""
     prefix = "Helsinki-NLP/opus-mt-"
     model_list = list_models()
-    model_ids = [x.id for x in model_list if x.id.startswith("Helsinki-NLP")]
+    model_ids = [x.modelId for x in model_list if x.modelId.startswith("Helsinki-NLP")]
     src_and_targ = [
         remove_prefix(m, prefix).lower().split("-") for m in model_ids if "+" not in m
-    ]  # + can't be loaded.
+    ]  # + cant be loaded.
     matching = [f"{prefix}{a}-{b}" for (a, b) in src_and_targ if src_lang in a and tgt_lang in b]
     return matching
 
@@ -93,7 +94,7 @@ def _cast_yaml_str(v):
         return v
 
 
-def cast_marian_config(raw_cfg: dict[str, str]) -> dict:
+def cast_marian_config(raw_cfg: Dict[str, str]) -> Dict:
     return {k: _cast_yaml_str(v) for k, v in raw_cfg.items()}
 
 
@@ -314,7 +315,7 @@ def convert_all_sentencepiece_models(model_list=None, repo_path=None, dest_dir=P
     return save_paths
 
 
-def lmap(f, x) -> list:
+def lmap(f, x) -> List:
     return list(map(f, x))
 
 
@@ -369,7 +370,7 @@ def save_tokenizer_config(dest_dir: Path, separate_vocabs=False):
     save_json(dct, dest_dir / "tokenizer_config.json")
 
 
-def add_to_vocab_(vocab: dict[str, int], special_tokens: list[str]):
+def add_to_vocab_(vocab: Dict[str, int], special_tokens: List[str]):
     start = max(vocab.values()) + 1
     added = 0
     for tok in special_tokens:
@@ -621,10 +622,6 @@ class OpusState:
             bias_tensor = nn.Parameter(torch.FloatTensor(self.final_bias))
             model.model.decoder.embed_tokens.weight = decoder_wemb_tensor
 
-        # handle tied embeddings, otherwise "from_pretrained" loads them incorrectly
-        if self.cfg["tied-embeddings"]:
-            model.lm_head.weight.data = model.model.decoder.embed_tokens.weight.data.clone()
-
         model.final_logits_bias = bias_tensor
 
         if "Wpos" in state_dict:
@@ -684,7 +681,7 @@ def load_yaml(path):
         return yaml.load(f, Loader=yaml.BaseLoader)
 
 
-def save_json(content: dict | list, path: str) -> None:
+def save_json(content: Union[Dict, List], path: str) -> None:
     with open(path, "w") as f:
         json.dump(content, f)
 
@@ -700,12 +697,7 @@ if __name__ == "__main__":
     """
     parser = argparse.ArgumentParser()
     # Required parameters
-    parser.add_argument(
-        "--src",
-        type=str,
-        help="path to marian model sub dir. yaml.load will be used to load the configuration file, please be wary of which file you're loading.",
-        default="en-de",
-    )
+    parser.add_argument("--src", type=str, help="path to marian model sub dir", default="en-de")
     parser.add_argument("--dest", type=str, default=None, help="Path to the output PyTorch model.")
     args = parser.parse_args()
 

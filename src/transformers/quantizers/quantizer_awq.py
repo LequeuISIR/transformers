@@ -21,10 +21,9 @@ from .base import HfQuantizer
 
 if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
-    from ..utils.quantization_config import AwqConfig
 
-from ..utils import is_accelerate_available, is_gptqmodel_available, is_torch_available, logging
-from ..utils.quantization_config import AwqBackend
+from ..utils import is_accelerate_available, is_auto_awq_available, is_torch_available, logging
+from ..utils.quantization_config import AWQLinearVersion
 
 
 if is_torch_available():
@@ -35,58 +34,84 @@ logger = logging.get_logger(__name__)
 
 class AwqQuantizer(HfQuantizer):
     """
-    4-bit quantization for Activation-aware Weight Quantization(AWQ) (https://huggingface.co/papers/2306.00978)
+    4-bit quantization for Activation-aware Weight Quantization(AWQ) (https://arxiv.org/abs/2306.00978)
     """
 
-    # AWQ requires data calibration - we support only inference
+    # AWQ requires data callibration - we support only inference
     requires_calibration = True
-    quantization_config: "AwqConfig"
+
+    required_packages = ["awq", "accelerate"]
 
     def __init__(self, quantization_config, **kwargs):
         super().__init__(quantization_config, **kwargs)
 
-    def validate_environment(self, **kwargs):
-        if not is_gptqmodel_available():
-            raise ImportError(
-                "Loading an AWQ quantized model requires gptqmodel. Please install it with `pip install gptqmodel`"
-            )
+    def validate_environment(self, device_map, **kwargs):
+        if not torch.cuda.is_available():
+            raise RuntimeError("GPU is required to run AWQ quantized model.")
+
+        if not is_auto_awq_available():
+            raise ImportError("Loading an AWQ quantized model requires auto-awq library (`pip install autoawq`)")
 
         if not is_accelerate_available():
             raise ImportError("Loading an AWQ quantized model requires accelerate (`pip install accelerate`)")
 
-    def update_dtype(self, dtype):
-        if dtype == torch.bfloat16 and (torch.cuda.is_available() or torch.xpu.is_available()):
-            logger.warning(
-                "`torch.bfloat16` is not supported for AWQ CUDA/XPU kernels yet. Casting to `torch.float16`."
+        if device_map is None:
+            logger.warning_once(
+                "You have loaded an AWQ model on CPU and have a CUDA device available, make sure to set "
+                "your model on a GPU device in order to run your model."
             )
-            dtype = torch.float16
-        elif dtype != torch.float16 and (torch.cuda.is_available() or torch.xpu.is_available()):
-            logger.warning("We suggest you to set `dtype=torch.float16` for better efficiency on CUDA/XPU with AWQ.")
-        return dtype
+        elif device_map is not None:
+            if isinstance(device_map, dict) and ("cpu" in device_map.values() or "disk" in device_map.values()):
+                raise ValueError(
+                    "You are attempting to load an AWQ model with a device_map that contains a CPU or disk device."
+                    " This is not supported. Please remove the CPU or disk device from the device_map."
+                )
+
+    def update_torch_dtype(self, torch_dtype):
+        if torch_dtype is None:
+            torch_dtype = torch.float16
+        elif torch_dtype != torch.float16:
+            logger.warning("We suggest you to set `torch_dtype=torch.float16` for better efficiency with AWQ.")
+        return torch_dtype
 
     def _process_model_before_weight_loading(self, model: "PreTrainedModel", **kwargs):
-        from ..integrations import replace_quantization_scales, replace_with_awq_linear
+        from ..integrations import get_keys_to_not_convert, replace_with_awq_linear
 
-        self.modules_to_not_convert = self.get_modules_to_not_convert(
-            model, self.quantization_config.modules_to_not_convert, model._keep_in_fp32_modules, add_default_skips=True
+        self.modules_to_not_convert = get_keys_to_not_convert(model)
+
+        if self.quantization_config.modules_to_not_convert is not None:
+            self.modules_to_not_convert.extend(self.quantization_config.modules_to_not_convert)
+
+        model, has_been_replaced = replace_with_awq_linear(
+            model, quantization_config=self.quantization_config, modules_to_not_convert=self.modules_to_not_convert
         )
 
-        model = replace_with_awq_linear(
-            model,
-            quantization_config=self.quantization_config,
-            modules_to_not_convert=self.modules_to_not_convert,
-            device_map=kwargs.get("device_map"),
-        )
+        if not has_been_replaced:
+            logger.warning(
+                "You are loading an AWQ model but no linear modules were found in your model."
+                " Please double check your model architecture, or submit an issue on github if you think this is a bug."
+            )
 
-        model = replace_quantization_scales(model, model.config.model_type)
+    def _process_model_after_weight_loading(self, model):
+        if self.quantization_config.do_fuse:
+            from ..integrations import fuse_awq_modules
 
-    def _process_model_after_weight_loading(self, model, **kwargs):
-        from gptqmodel.utils.model import hf_gptqmodel_post_init
+            model = fuse_awq_modules(model, self.quantization_config)
+            model._awq_is_fused = True  # TODO: consider storing this flag in model.config instead
 
-        hf_gptqmodel_post_init(model, use_act_order=self.quantization_config.desc_act)
+        if self.quantization_config.version == AWQLinearVersion.EXLLAMA:
+            from ..integrations import post_init_awq_exllama_modules
 
+            model = post_init_awq_exllama_modules(model, self.quantization_config.exllama_config)
+
+    @property
     def is_serializable(self):
-        if self.quantization_config.backend in [AwqBackend.EXLLAMA_V1, AwqBackend.EXLLAMA_V2]:
+        # AWQ through auto-awq has been always serializable, except if the model is fused.
+        if self.quantization_config.do_fuse:
+            logger.warning("You cannot save an AWQ model that uses fused modules!")
+            return False
+
+        if self.quantization_config.version == AWQLinearVersion.EXLLAMA:
             logger.warning("You cannot save an AWQ model that uses Exllama backend!")
             return False
 
@@ -94,4 +119,6 @@ class AwqQuantizer(HfQuantizer):
 
     @property
     def is_trainable(self):
-        return version.parse(importlib.metadata.version("gptqmodel")) >= version.parse("5.0.0")
+        # AWQ supports PEFT fine-tuning from version 0.2.0
+        MIN_AWQ_VERSION_FOR_PEFT = "0.2.0"
+        return version.parse(importlib.metadata.version("autoawq")) >= version.parse(MIN_AWQ_VERSION_FOR_PEFT)

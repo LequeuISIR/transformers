@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from importlib import metadata
-from typing import TYPE_CHECKING
+import importlib
+from typing import TYPE_CHECKING, Optional
 
 from packaging import version
 
@@ -22,7 +22,7 @@ from .base import HfQuantizer
 if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
 
-from ..utils import is_gptqmodel_available, is_optimum_available, is_torch_available, logging
+from ..utils import is_auto_gptq_available, is_optimum_available, is_torch_available, logging
 from ..utils.quantization_config import GPTQConfig, QuantizationConfigMixin
 
 
@@ -32,66 +32,48 @@ if is_torch_available():
 logger = logging.get_logger(__name__)
 
 
-MIN_GPTQ_VERSION = "1.4.3"
-MIN_OPTIMUM_VERSION = "1.24.0"
-
-
 class GptqHfQuantizer(HfQuantizer):
     """
     Quantizer of the GPTQ method - for GPTQ the quantizer support calibration of the model through
-    the GPT-QModel package (Python import name `gptqmodel`). Quantization is done under the hood for users if they
-    load a non-prequantized model.
+    `auto_gptq` package. Quantization is done under the hood for users if they load a non-prequantized model.
     """
 
     requires_calibration = False
-    quantization_config: "GPTQConfig"
+    required_packages = ["optimum", "auto_gptq"]
+    optimum_quantizer = None
 
     def __init__(self, quantization_config: QuantizationConfigMixin, **kwargs):
         super().__init__(quantization_config, **kwargs)
-
-        if not is_optimum_available():
-            raise ImportError("Loading a GPTQ quantized model requires optimum (`pip install optimum`)")
         from optimum.gptq import GPTQQuantizer
 
         self.optimum_quantizer = GPTQQuantizer.from_dict(self.quantization_config.to_dict_optimum())
 
     def validate_environment(self, *args, **kwargs):
-        if not is_optimum_available():
-            raise ImportError("Loading a GPTQ quantized model requires optimum (`pip install optimum`)")
-
-        gptq_supports_cpu = is_gptqmodel_available()
+        gptq_supports_cpu = version.parse(importlib.metadata.version("auto-gptq")) > version.parse("0.4.2")
         if not gptq_supports_cpu and not torch.cuda.is_available():
             raise RuntimeError("GPU is required to quantize or run quantize model.")
-        elif not is_gptqmodel_available():
-            raise ImportError("Loading a GPTQ quantized model requires gptqmodel (`pip install gptqmodel`) library.")
-        elif is_gptqmodel_available() and (
-            version.parse(metadata.version("gptqmodel")) < version.parse(MIN_GPTQ_VERSION)
-            or version.parse(metadata.version("optimum")) < version.parse(MIN_OPTIMUM_VERSION)
-        ):
+        elif not (is_optimum_available() and is_auto_gptq_available()):
             raise ImportError(
-                f"The gptqmodel version should be >= {MIN_GPTQ_VERSION}, optimum version should >= {MIN_OPTIMUM_VERSION}"
+                "Loading a GPTQ quantized model requires optimum (`pip install optimum`) and auto-gptq library (`pip install auto-gptq`)"
+            )
+        elif version.parse(importlib.metadata.version("auto_gptq")) < version.parse("0.4.2"):
+            raise ImportError(
+                "You need a version of auto_gptq >= 0.4.2 to use GPTQ: `pip install --upgrade auto-gptq`"
             )
 
-    def update_dtype(self, dtype: "torch.dtype") -> "torch.dtype":
-        if dtype != torch.float16:
-            logger.info("We suggest you to set `dtype=torch.float16` for better efficiency with GPTQ.")
-        return dtype
-
-    def update_device_map(self, device_map):
-        if device_map is None:
-            device_map = {"": torch.device("cpu")}
-        return device_map
+    def update_torch_dtype(self, torch_dtype: "torch.dtype") -> "torch.dtype":
+        if torch_dtype is None:
+            torch_dtype = torch.float16
+        elif torch_dtype != torch.float16:
+            logger.info("We suggest you to set `torch_dtype=torch.float16` for better efficiency with GPTQ.")
+        return torch_dtype
 
     def _process_model_before_weight_loading(self, model: "PreTrainedModel", **kwargs):
         if model.__class__.main_input_name != "input_ids":
             raise RuntimeError("We can only quantize pure text model.")
 
         if self.pre_quantized:
-            # compat: latest optimum has gptqmodel refactor
-            if version.parse(metadata.version("optimum")) < version.parse(MIN_OPTIMUM_VERSION):
-                model = self.optimum_quantizer.convert_model(model)
-            else:
-                model = self.optimum_quantizer.convert_model(model, **kwargs)
+            model = self.optimum_quantizer.convert_model(model)
 
     def _process_model_after_weight_loading(self, model: "PreTrainedModel", **kwargs):
         if self.pre_quantized:
@@ -104,8 +86,9 @@ class GptqHfQuantizer(HfQuantizer):
             model.config.quantization_config = GPTQConfig.from_dict(self.optimum_quantizer.to_dict())
 
     @property
-    def is_trainable(self) -> bool:
+    def is_trainable(self, model: Optional["PreTrainedModel"] = None):
         return True
 
+    @property
     def is_serializable(self):
         return True

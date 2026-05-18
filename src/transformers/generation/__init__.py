@@ -14,20 +14,12 @@
 
 from typing import TYPE_CHECKING
 
-from ..utils import OptionalDependencyNotAvailable, _LazyModule, is_torch_available
+from ..utils import OptionalDependencyNotAvailable, _LazyModule, is_flax_available, is_tf_available, is_torch_available
 
 
 _import_structure = {
-    "configuration_utils": [
-        "BaseWatermarkingConfig",
-        "CompileConfig",
-        "ContinuousBatchingConfig",
-        "GenerationConfig",
-        "GenerationMode",
-        "SynthIDTextWatermarkingConfig",
-        "WatermarkingConfig",
-    ],
-    "streamers": ["AsyncTextIteratorStreamer", "BaseStreamer", "TextIteratorStreamer", "TextStreamer"],
+    "configuration_utils": ["GenerationConfig", "GenerationMode"],
+    "streamers": ["TextIteratorStreamer", "TextStreamer"],
 }
 
 try:
@@ -36,10 +28,21 @@ try:
 except OptionalDependencyNotAvailable:
     pass
 else:
+    _import_structure["beam_constraints"] = [
+        "Constraint",
+        "ConstraintListState",
+        "DisjunctiveConstraint",
+        "PhrasalConstraint",
+    ]
+    _import_structure["beam_search"] = [
+        "BeamHypotheses",
+        "BeamScorer",
+        "BeamSearchScorer",
+        "ConstrainedBeamSearchScorer",
+    ]
     _import_structure["candidate_generator"] = [
         "AssistedCandidateGenerator",
         "CandidateGenerator",
-        "EarlyExitCandidateGenerator",
         "PromptLookupCandidateGenerator",
     ]
     _import_structure["logits_process"] = [
@@ -52,13 +55,15 @@ else:
         "ExponentialDecayLengthPenalty",
         "ForcedBOSTokenLogitsProcessor",
         "ForcedEOSTokenLogitsProcessor",
+        "ForceTokensLogitsProcessor",
+        "HammingDiversityLogitsProcessor",
         "InfNanRemoveLogitsProcessor",
         "LogitNormalization",
         "LogitsProcessor",
         "LogitsProcessorList",
+        "LogitsWarper",
         "MinLengthLogitsProcessor",
         "MinNewTokensLengthLogitsProcessor",
-        "MinPLogitsWarper",
         "NoBadWordsLogitsProcessor",
         "NoRepeatNGramLogitsProcessor",
         "PrefixConstrainedLogitsProcessor",
@@ -66,60 +71,107 @@ else:
         "SequenceBiasLogitsProcessor",
         "SuppressTokensLogitsProcessor",
         "SuppressTokensAtBeginLogitsProcessor",
-        "SynthIDTextWatermarkLogitsProcessor",
         "TemperatureLogitsWarper",
-        "TopHLogitsWarper",
         "TopKLogitsWarper",
         "TopPLogitsWarper",
         "TypicalLogitsWarper",
         "UnbatchedClassifierFreeGuidanceLogitsProcessor",
         "WhisperTimeStampLogitsProcessor",
-        "WatermarkLogitsProcessor",
     ]
     _import_structure["stopping_criteria"] = [
+        "MaxNewTokensCriteria",
         "MaxLengthCriteria",
         "MaxTimeCriteria",
-        "ConfidenceCriteria",
-        "EosTokenCriteria",
         "StoppingCriteria",
         "StoppingCriteriaList",
         "validate_stopping_criteria",
-        "StopStringCriteria",
-    ]
-    _import_structure["continuous_batching"] = [
-        "ContinuousBatchingManager",
-        "ContinuousMixin",
-        "FIFOScheduler",
-        "PrefillFirstScheduler",
-        "Scheduler",
     ]
     _import_structure["utils"] = [
         "GenerationMixin",
+        "GreedySearchEncoderDecoderOutput",
+        "GreedySearchDecoderOnlyOutput",
+        "SampleEncoderDecoderOutput",
+        "SampleDecoderOnlyOutput",
+        "BeamSearchEncoderDecoderOutput",
+        "BeamSearchDecoderOnlyOutput",
+        "BeamSampleEncoderDecoderOutput",
+        "BeamSampleDecoderOnlyOutput",
+        "ContrastiveSearchEncoderDecoderOutput",
+        "ContrastiveSearchDecoderOnlyOutput",
         "GenerateBeamDecoderOnlyOutput",
         "GenerateBeamEncoderDecoderOutput",
         "GenerateDecoderOnlyOutput",
         "GenerateEncoderDecoderOutput",
     ]
-    _import_structure["watermarking"] = [
-        "WatermarkDetector",
-        "WatermarkDetectorOutput",
-        "BayesianDetectorModel",
-        "BayesianDetectorConfig",
-        "SynthIDTextWatermarkDetector",
+
+try:
+    if not is_tf_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    pass
+else:
+    _import_structure["tf_logits_process"] = [
+        "TFForcedBOSTokenLogitsProcessor",
+        "TFForcedEOSTokenLogitsProcessor",
+        "TFForceTokensLogitsProcessor",
+        "TFLogitsProcessor",
+        "TFLogitsProcessorList",
+        "TFLogitsWarper",
+        "TFMinLengthLogitsProcessor",
+        "TFNoBadWordsLogitsProcessor",
+        "TFNoRepeatNGramLogitsProcessor",
+        "TFRepetitionPenaltyLogitsProcessor",
+        "TFSuppressTokensAtBeginLogitsProcessor",
+        "TFSuppressTokensLogitsProcessor",
+        "TFTemperatureLogitsWarper",
+        "TFTopKLogitsWarper",
+        "TFTopPLogitsWarper",
+    ]
+    _import_structure["tf_utils"] = [
+        "TFGenerationMixin",
+        "TFGreedySearchDecoderOnlyOutput",
+        "TFGreedySearchEncoderDecoderOutput",
+        "TFSampleEncoderDecoderOutput",
+        "TFSampleDecoderOnlyOutput",
+        "TFBeamSearchEncoderDecoderOutput",
+        "TFBeamSearchDecoderOnlyOutput",
+        "TFBeamSampleEncoderDecoderOutput",
+        "TFBeamSampleDecoderOnlyOutput",
+        "TFContrastiveSearchEncoderDecoderOutput",
+        "TFContrastiveSearchDecoderOnlyOutput",
     ]
 
+try:
+    if not is_flax_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    pass
+else:
+    _import_structure["flax_logits_process"] = [
+        "FlaxForcedBOSTokenLogitsProcessor",
+        "FlaxForcedEOSTokenLogitsProcessor",
+        "FlaxForceTokensLogitsProcessor",
+        "FlaxLogitsProcessor",
+        "FlaxLogitsProcessorList",
+        "FlaxLogitsWarper",
+        "FlaxMinLengthLogitsProcessor",
+        "FlaxSuppressTokensAtBeginLogitsProcessor",
+        "FlaxSuppressTokensLogitsProcessor",
+        "FlaxTemperatureLogitsWarper",
+        "FlaxTopKLogitsWarper",
+        "FlaxTopPLogitsWarper",
+        "FlaxWhisperTimeStampLogitsProcessor",
+    ]
+    _import_structure["flax_utils"] = [
+        "FlaxGenerationMixin",
+        "FlaxGreedySearchOutput",
+        "FlaxSampleOutput",
+        "FlaxBeamSearchOutput",
+    ]
 
 if TYPE_CHECKING:
-    from .configuration_utils import (
-        BaseWatermarkingConfig,
-        CompileConfig,
-        ContinuousBatchingConfig,
-        GenerationConfig,
-        GenerationMode,
-        SynthIDTextWatermarkingConfig,
-        WatermarkingConfig,
-    )
-    from .streamers import AsyncTextIteratorStreamer, BaseStreamer, TextIteratorStreamer, TextStreamer
+    from .configuration_utils import GenerationConfig, GenerationMode
+    from .streamers import TextIteratorStreamer, TextStreamer
 
     try:
         if not is_torch_available():
@@ -127,19 +179,9 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .candidate_generator import (
-            AssistedCandidateGenerator,
-            CandidateGenerator,
-            EarlyExitCandidateGenerator,
-            PromptLookupCandidateGenerator,
-        )
-        from .continuous_batching import (
-            ContinuousBatchingManager,
-            ContinuousMixin,
-            FIFOScheduler,
-            PrefillFirstScheduler,
-            Scheduler,
-        )
+        from .beam_constraints import Constraint, ConstraintListState, DisjunctiveConstraint, PhrasalConstraint
+        from .beam_search import BeamHypotheses, BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer
+        from .candidate_generator import AssistedCandidateGenerator, CandidateGenerator, PromptLookupCandidateGenerator
         from .logits_process import (
             AlternatingCodebooksLogitsProcessor,
             ClassifierFreeGuidanceLogitsProcessor,
@@ -150,13 +192,15 @@ if TYPE_CHECKING:
             ExponentialDecayLengthPenalty,
             ForcedBOSTokenLogitsProcessor,
             ForcedEOSTokenLogitsProcessor,
+            ForceTokensLogitsProcessor,
+            HammingDiversityLogitsProcessor,
             InfNanRemoveLogitsProcessor,
             LogitNormalization,
             LogitsProcessor,
             LogitsProcessorList,
+            LogitsWarper,
             MinLengthLogitsProcessor,
             MinNewTokensLengthLogitsProcessor,
-            MinPLogitsWarper,
             NoBadWordsLogitsProcessor,
             NoRepeatNGramLogitsProcessor,
             PrefixConstrainedLogitsProcessor,
@@ -164,41 +208,98 @@ if TYPE_CHECKING:
             SequenceBiasLogitsProcessor,
             SuppressTokensAtBeginLogitsProcessor,
             SuppressTokensLogitsProcessor,
-            SynthIDTextWatermarkLogitsProcessor,
             TemperatureLogitsWarper,
-            TopHLogitsWarper,
             TopKLogitsWarper,
             TopPLogitsWarper,
             TypicalLogitsWarper,
             UnbatchedClassifierFreeGuidanceLogitsProcessor,
-            WatermarkLogitsProcessor,
             WhisperTimeStampLogitsProcessor,
         )
         from .stopping_criteria import (
-            ConfidenceCriteria,
-            EosTokenCriteria,
             MaxLengthCriteria,
+            MaxNewTokensCriteria,
             MaxTimeCriteria,
             StoppingCriteria,
             StoppingCriteriaList,
-            StopStringCriteria,
             validate_stopping_criteria,
         )
         from .utils import (
+            BeamSampleDecoderOnlyOutput,
+            BeamSampleEncoderDecoderOutput,
+            BeamSearchDecoderOnlyOutput,
+            BeamSearchEncoderDecoderOutput,
+            ContrastiveSearchDecoderOnlyOutput,
+            ContrastiveSearchEncoderDecoderOutput,
             GenerateBeamDecoderOnlyOutput,
             GenerateBeamEncoderDecoderOutput,
             GenerateDecoderOnlyOutput,
             GenerateEncoderDecoderOutput,
             GenerationMixin,
-        )
-        from .watermarking import (
-            BayesianDetectorConfig,
-            BayesianDetectorModel,
-            SynthIDTextWatermarkDetector,
-            WatermarkDetector,
-            WatermarkDetectorOutput,
+            GreedySearchDecoderOnlyOutput,
+            GreedySearchEncoderDecoderOutput,
+            SampleDecoderOnlyOutput,
+            SampleEncoderDecoderOutput,
         )
 
+    try:
+        if not is_tf_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        pass
+    else:
+        from .tf_logits_process import (
+            TFForcedBOSTokenLogitsProcessor,
+            TFForcedEOSTokenLogitsProcessor,
+            TFForceTokensLogitsProcessor,
+            TFLogitsProcessor,
+            TFLogitsProcessorList,
+            TFLogitsWarper,
+            TFMinLengthLogitsProcessor,
+            TFNoBadWordsLogitsProcessor,
+            TFNoRepeatNGramLogitsProcessor,
+            TFRepetitionPenaltyLogitsProcessor,
+            TFSuppressTokensAtBeginLogitsProcessor,
+            TFSuppressTokensLogitsProcessor,
+            TFTemperatureLogitsWarper,
+            TFTopKLogitsWarper,
+            TFTopPLogitsWarper,
+        )
+        from .tf_utils import (
+            TFBeamSampleDecoderOnlyOutput,
+            TFBeamSampleEncoderDecoderOutput,
+            TFBeamSearchDecoderOnlyOutput,
+            TFBeamSearchEncoderDecoderOutput,
+            TFContrastiveSearchDecoderOnlyOutput,
+            TFContrastiveSearchEncoderDecoderOutput,
+            TFGenerationMixin,
+            TFGreedySearchDecoderOnlyOutput,
+            TFGreedySearchEncoderDecoderOutput,
+            TFSampleDecoderOnlyOutput,
+            TFSampleEncoderDecoderOutput,
+        )
+
+    try:
+        if not is_flax_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        pass
+    else:
+        from .flax_logits_process import (
+            FlaxForcedBOSTokenLogitsProcessor,
+            FlaxForcedEOSTokenLogitsProcessor,
+            FlaxForceTokensLogitsProcessor,
+            FlaxLogitsProcessor,
+            FlaxLogitsProcessorList,
+            FlaxLogitsWarper,
+            FlaxMinLengthLogitsProcessor,
+            FlaxSuppressTokensAtBeginLogitsProcessor,
+            FlaxSuppressTokensLogitsProcessor,
+            FlaxTemperatureLogitsWarper,
+            FlaxTopKLogitsWarper,
+            FlaxTopPLogitsWarper,
+            FlaxWhisperTimeStampLogitsProcessor,
+        )
+        from .flax_utils import FlaxBeamSearchOutput, FlaxGenerationMixin, FlaxGreedySearchOutput, FlaxSampleOutput
 else:
     import sys
 

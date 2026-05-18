@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,17 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""VisionTextDualEncoder model configuration"""
+""" VisionTextDualEncoder model configuration"""
 
-from huggingface_hub.dataclasses import strict
 
-from ...configuration_utils import PreTrainedConfig
-from ...utils import auto_docstring
+from ...configuration_utils import PretrainedConfig
+from ...utils import logging
 from ..auto.configuration_auto import AutoConfig
 from ..chinese_clip.configuration_chinese_clip import ChineseCLIPVisionConfig
 from ..clip.configuration_clip import CLIPVisionConfig
 from ..siglip.configuration_siglip import SiglipVisionConfig
 
+
+logger = logging.get_logger(__name__)
 
 VISION_MODEL_CONFIGS = {
     "clip_vision_model": CLIPVisionConfig,
@@ -30,10 +32,23 @@ VISION_MODEL_CONFIGS = {
 }
 
 
-@auto_docstring
-@strict
-class VisionTextDualEncoderConfig(PreTrainedConfig):
+class VisionTextDualEncoderConfig(PretrainedConfig):
     r"""
+    [`VisionTextDualEncoderConfig`] is the configuration class to store the configuration of a
+    [`VisionTextDualEncoderModel`]. It is used to instantiate [`VisionTextDualEncoderModel`] model according to the
+    specified arguments, defining the text model and vision model configs.
+
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PretrainedConfig`] for more information.
+
+    Args:
+        projection_dim (`int`, *optional*, defaults to 512):
+            Dimentionality of text and vision projection layers.
+        logit_scale_init_value (`float`, *optional*, defaults to 2.6592):
+            The inital value of the *logit_scale* paramter. Default is used as per the original CLIP implementation.
+        kwargs (*optional*):
+            Dictionary of keyword arguments.
+
     Examples:
 
     ```python
@@ -61,18 +76,17 @@ class VisionTextDualEncoderConfig(PreTrainedConfig):
     ```"""
 
     model_type = "vision-text-dual-encoder"
-    sub_configs = {"vision_config": AutoConfig, "text_config": AutoConfig}
-    has_no_defaults_at_init = True
+    is_composition = True
 
-    projection_dim: int = 512
-    logit_scale_init_value: int | float = 2.6592
+    def __init__(self, projection_dim=512, logit_scale_init_value=2.6592, **kwargs):
+        super().__init__(**kwargs)
 
-    def __post_init__(self, **kwargs):
-        if "vision_config" not in kwargs or "text_config" not in kwargs:
-            raise ValueError(
-                f"A configuration of type {self.model_type} cannot be instantiated because not both `vision_config` and"
-                f" `text_config` sub-configurations are passed, but only {kwargs}"
-            )
+        if "vision_config" not in kwargs:
+            raise ValueError("`vision_config` can not be `None`.")
+
+        if "text_config" not in kwargs:
+            raise ValueError("`text_config` can not be `None`.")
+
         vision_config = kwargs.pop("vision_config")
         text_config = kwargs.pop("text_config")
 
@@ -86,12 +100,14 @@ class VisionTextDualEncoderConfig(PreTrainedConfig):
             self.vision_config = AutoConfig.for_model(vision_model_type, **vision_config)
             if hasattr(self.vision_config, "vision_config"):
                 self.vision_config = self.vision_config.vision_config
+
         self.text_config = AutoConfig.for_model(text_model_type, **text_config)
 
-        super().__post_init__(**kwargs)
+        self.projection_dim = projection_dim
+        self.logit_scale_init_value = logit_scale_init_value
 
     @classmethod
-    def from_vision_text_configs(cls, vision_config: PreTrainedConfig, text_config: PreTrainedConfig, **kwargs):
+    def from_vision_text_configs(cls, vision_config: PretrainedConfig, text_config: PretrainedConfig, **kwargs):
         r"""
         Instantiate a [`VisionTextDualEncoderConfig`] (or a derived class) from text model configuration and vision
         model configuration.
@@ -101,6 +117,3 @@ class VisionTextDualEncoderConfig(PreTrainedConfig):
         """
 
         return cls(vision_config=vision_config.to_dict(), text_config=text_config.to_dict(), **kwargs)
-
-
-__all__ = ["VisionTextDualEncoderConfig"]

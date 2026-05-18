@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -328,7 +329,7 @@ def convert_checkpoint(
         phonemize = True
     else:
         # Save vocab as temporary json file
-        symbols = [line.replace("\n", "") for line in open(vocab_path, encoding="utf-8")]
+        symbols = [line.replace("\n", "") for line in open(vocab_path, encoding="utf-8").readlines()]
         symbol_to_id = {s: i for i, s in enumerate(symbols)}
         # MMS-TTS does not use a <pad> token, so we set to the token used to space characters
         _pad = symbols[0]
@@ -345,7 +346,7 @@ def convert_checkpoint(
 
     model.decoder.apply_weight_norm()
 
-    orig_checkpoint = torch.load(checkpoint_path, map_location=torch.device("cpu"), weights_only=True)
+    orig_checkpoint = torch.load(checkpoint_path, map_location=torch.device("cpu"))
     recursively_load_weights(orig_checkpoint["model"], model)
 
     model.decoder.remove_weight_norm()
@@ -373,7 +374,7 @@ if __name__ == "__main__":
         "--pytorch_dump_folder_path", required=True, default=None, type=str, help="Path to the output PyTorch model."
     )
     parser.add_argument(
-        "--push_to_hub", default=None, type=str, help="Where to upload the converted model on the Hugging Face hub."
+        "--push_to_hub", default=None, type=str, help="Where to upload the converted model on the 🤗 hub."
     )
 
     args = parser.parse_args()

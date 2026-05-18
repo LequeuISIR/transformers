@@ -14,12 +14,10 @@
 # limitations under the License.
 
 """Protein data type."""
-
 import dataclasses
 import re
 import string
-from collections.abc import Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -56,38 +54,39 @@ class Protein:
     b_factors: np.ndarray  # [num_res, num_atom_type]
 
     # Chain indices for multi-chain predictions
-    chain_index: np.ndarray | None = None
+    chain_index: Optional[np.ndarray] = None
 
     # Optional remark about the protein. Included as a comment in output PDB
     # files
-    remark: str | None = None
+    remark: Optional[str] = None
 
     # Templates used to generate this protein (prediction-only)
-    parents: Sequence[str] | None = None
+    parents: Optional[Sequence[str]] = None
 
     # Chain corresponding to each parent
-    parents_chain_index: Sequence[int] | None = None
+    parents_chain_index: Optional[Sequence[int]] = None
 
 
 def from_proteinnet_string(proteinnet_str: str) -> Protein:
     tag_re = r"(\[[A-Z]+\]\n)"
-    tags: list[str] = [tag.strip() for tag in re.split(tag_re, proteinnet_str) if len(tag) > 0]
-    groups: Iterator[tuple[str, list[str]]] = zip(tags[0::2], [l.split("\n") for l in tags[1::2]])
+    tags: List[str] = [tag.strip() for tag in re.split(tag_re, proteinnet_str) if len(tag) > 0]
+    groups: Iterator[Tuple[str, List[str]]] = zip(tags[0::2], [l.split("\n") for l in tags[1::2]])
 
-    atoms: list[str] = ["N", "CA", "C"]
+    atoms: List[str] = ["N", "CA", "C"]
     aatype = None
     atom_positions = None
     atom_mask = None
     for g in groups:
-        if g[0] == "[PRIMARY]":
+        if "[PRIMARY]" == g[0]:
             seq = g[1][0].strip()
-            # Replace unknown residues with "X" (strings are immutable, so convert to list first)
-            seq = [char if char in residue_constants.restypes else "X" for char in seq]
+            for i in range(len(seq)):
+                if seq[i] not in residue_constants.restypes:
+                    seq[i] = "X"  # FIXME: strings are immutable
             aatype = np.array(
                 [residue_constants.restype_order.get(res_symbol, residue_constants.restype_num) for res_symbol in seq]
             )
-        elif g[0] == "[TERTIARY]":
-            tertiary: list[list[float]] = []
+        elif "[TERTIARY]" == g[0]:
+            tertiary: List[List[float]] = []
             for axis in range(3):
                 tertiary.append(list(map(float, g[1][axis].split())))
             tertiary_np = np.array(tertiary)
@@ -95,7 +94,7 @@ def from_proteinnet_string(proteinnet_str: str) -> Protein:
             for i, atom in enumerate(atoms):
                 atom_positions[:, residue_constants.atom_order[atom], :] = np.transpose(tertiary_np[:, i::3])
             atom_positions *= PICO_TO_ANGSTROM
-        elif g[0] == "[MASK]":
+        elif "[MASK]" == g[0]:
             mask = np.array(list(map({"-": 0, "+": 1}.get, g[1][0].strip())))
             atom_mask = np.zeros(
                 (
@@ -118,8 +117,8 @@ def from_proteinnet_string(proteinnet_str: str) -> Protein:
     )
 
 
-def get_pdb_headers(prot: Protein, chain_id: int = 0) -> list[str]:
-    pdb_headers: list[str] = []
+def get_pdb_headers(prot: Protein, chain_id: int = 0) -> List[str]:
+    pdb_headers: List[str] = []
 
     remark = prot.remark
     if remark is not None:
@@ -142,23 +141,23 @@ def add_pdb_headers(prot: Protein, pdb_str: str) -> str:
     """Add pdb headers to an existing PDB string. Useful during multi-chain
     recycling
     """
-    out_pdb_lines: list[str] = []
+    out_pdb_lines: List[str] = []
     lines = pdb_str.split("\n")
 
     remark = prot.remark
     if remark is not None:
         out_pdb_lines.append(f"REMARK {remark}")
 
-    parents_per_chain: list[list[str]]
+    parents_per_chain: List[List[str]]
     if prot.parents is not None and len(prot.parents) > 0:
         parents_per_chain = []
         if prot.parents_chain_index is not None:
-            parent_dict: dict[str, list[str]] = {}
+            parent_dict: Dict[str, List[str]] = {}
             for p, i in zip(prot.parents, prot.parents_chain_index):
                 parent_dict.setdefault(str(i), [])
                 parent_dict[str(i)].append(p)
 
-            max_idx = max(int(chain_idx) for chain_idx in parent_dict)
+            max_idx = max([int(chain_idx) for chain_idx in parent_dict])
             for i in range(max_idx + 1):
                 chain_parents = parent_dict.get(str(i), ["N/A"])
                 parents_per_chain.append(chain_parents)
@@ -204,7 +203,7 @@ def to_pdb(prot: Protein) -> str:
 
     atom_types = residue_constants.atom_types
 
-    pdb_lines: list[str] = []
+    pdb_lines: List[str] = []
 
     atom_mask = prot.atom_mask
     aatype = prot.aatype
@@ -299,11 +298,11 @@ def ideal_atom_mask(prot: Protein) -> np.ndarray:
 def from_prediction(
     features: FeatureDict,
     result: ModelOutput,
-    b_factors: np.ndarray | None = None,
-    chain_index: np.ndarray | None = None,
-    remark: str | None = None,
-    parents: Sequence[str] | None = None,
-    parents_chain_index: Sequence[int] | None = None,
+    b_factors: Optional[np.ndarray] = None,
+    chain_index: Optional[np.ndarray] = None,
+    remark: Optional[str] = None,
+    parents: Optional[Sequence[str]] = None,
+    parents_chain_index: Optional[Sequence[int]] = None,
 ) -> Protein:
     """Assembles a protein from a prediction.
 

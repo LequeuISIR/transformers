@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 Microsoft Research & University of Wisconsin-Madison and the HuggingFace Inc. team. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -10,23 +11,48 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""VipLlava model configuration"""
+""" VipLlava model configuration"""
 
-from huggingface_hub.dataclasses import strict
+import warnings
 
-from ...configuration_utils import PreTrainedConfig
-from ...utils import auto_docstring
-from ..auto import CONFIG_MAPPING, AutoConfig
+from ...configuration_utils import PretrainedConfig
+from ...utils import logging
+from ..auto import CONFIG_MAPPING
 
 
-@auto_docstring(checkpoint="llava-hf/vip-llava-7b-hf")
-@strict
-class VipLlavaConfig(PreTrainedConfig):
+logger = logging.get_logger(__name__)
+
+VIPLLAVA_PRETRAINED_CONFIG_ARCHIVE_MAP = {
+    "ybelkada/vip-llava-7b-hf": "https://huggingface.co/llava-hf/vip-llava-7b-hf/resolve/main/config.json",
+}
+
+
+class VipLlavaConfig(PretrainedConfig):
     r"""
-    projector_layernorm_eps (`float`, *optional*, defaults to 1e-05):
-        The layer norm epsilon of the projector layernorm
-    vision_feature_layers (`Union[int, list[int]]`, *optional*, defaults to `[-2, -5, -8, -11, 6]`):
-        The vision feature layer, or list of layers to select the vision features from.
+    This is the configuration class to store the configuration of a [`VipLlavaForConditionalGeneration`]. It is used to instantiate an
+    VipLlava model according to the specified arguments, defining the model architecture. Instantiating a configuration
+    with the defaults will yield a similar configuration to that of the VipLlava-9B.
+
+    e.g. [ybelkada/vip-llava-7b-hf](https://huggingface.co/ybelkada/vip-llava-7b-hf)
+
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PretrainedConfig`] for more information.
+
+    Args:
+        vision_config (`VipLlavaVisionConfig`,  *optional*):
+            Custom vision config or dict
+        text_config (`Union[AutoConfig, dict]`, *optional*):
+            The config object of the text backbone. Can be any of `LlamaConfig` or `MistralConfig`.
+        ignore_index (`int`, *optional*, defaults to -100):
+            The ignore index for the loss function.
+        image_token_index (`int`, *optional*, defaults to 32000):
+            The image token index to encode the image prompt.
+        projector_hidden_act (`str`, *optional*, defaults to `"gelu"`):
+            The activation function used by the multimodal projector.
+        projector_layernorm_eps (`float`, *optional*, defaults to 1e-05):
+            The layer norm epsilon of the projector layernorm
+        vision_feature_layers (`List[int]`, *optional*, defaults to `[-2, -5, -8, -11, 6]`):
+            The list of layers to select the vision features from.
 
     Example:
 
@@ -50,25 +76,39 @@ class VipLlavaConfig(PreTrainedConfig):
     ```"""
 
     model_type = "vipllava"
-    attribute_map = {
-        "image_token_id": "image_token_index",
-    }
-    sub_configs = {"text_config": AutoConfig, "vision_config": AutoConfig}
+    is_composition = False
 
-    vision_config: dict | PreTrainedConfig | None = None
-    text_config: dict | PreTrainedConfig | None = None
-    image_token_index: int = 32000
-    projector_hidden_act: str = "gelu"
-    projector_layernorm_eps: float = 1e-5
-    vision_feature_layers: int | list[int] | tuple[int, ...] = (-2, -5, -8, -11, 6)
-    image_seq_length: int = 576
-    tie_word_embeddings: bool = False
+    def __init__(
+        self,
+        vision_config=None,
+        text_config=None,
+        ignore_index=-100,
+        image_token_index=32000,
+        projector_hidden_act="gelu",
+        projector_layernorm_eps=1e-5,
+        vision_feature_layers=[-2, -5, -8, -11, 6],
+        **kwargs,
+    ):
+        self.ignore_index = ignore_index
+        self.image_token_index = image_token_index
+        self.projector_hidden_act = projector_hidden_act
+        self.projector_layernorm_eps = projector_layernorm_eps
+        self.vision_feature_layers = vision_feature_layers
 
-    def __post_init__(self, **kwargs):
+        if "vocab_size" in kwargs:
+            warnings.warn(
+                "The `vocab_size` argument is deprecated and will be removed in v4.42, since it can be inferred from the `text_config`. Passing this argument has no effect",
+                FutureWarning,
+            )
+
+        self.vision_config = vision_config
+
         if isinstance(self.vision_config, dict):
-            self.vision_config["model_type"] = self.vision_config.get("model_type", "clip_vision_model")
-            self.vision_config = CONFIG_MAPPING[self.vision_config["model_type"]](**self.vision_config)
-        elif self.vision_config is None:
+            vision_config["model_type"] = (
+                vision_config["model_type"] if "model_type" in vision_config else "clip_vision_model"
+            )
+            self.vision_config = CONFIG_MAPPING[vision_config["model_type"]](**vision_config)
+        elif vision_config is None:
             self.vision_config = CONFIG_MAPPING["clip_vision_model"](
                 intermediate_size=4096,
                 hidden_size=1024,
@@ -80,13 +120,26 @@ class VipLlavaConfig(PreTrainedConfig):
                 projection_dim=768,
             )
 
-        if isinstance(self.text_config, dict):
-            self.text_config["model_type"] = self.text_config.get("model_type", "llama")
-            self.text_config = CONFIG_MAPPING[self.text_config["model_type"]](**self.text_config)
-        elif self.text_config is None:
-            self.text_config = CONFIG_MAPPING["llama"]()
+        if isinstance(text_config, dict):
+            text_config["model_type"] = text_config["model_type"] if "model_type" in text_config else "llama"
+            text_config = CONFIG_MAPPING[text_config["model_type"]](**text_config)
+        elif text_config is None:
+            text_config = CONFIG_MAPPING["llama"]()
 
-        super().__post_init__(**kwargs)
+        self.text_config = text_config
+        self._vocab_size = self.text_config.vocab_size
 
+        super().__init__(**kwargs)
 
-__all__ = ["VipLlavaConfig"]
+        @property
+        def vocab_size(self):
+            warnings.warn(
+                "The `vocab_size` attribute is deprecated and will be removed in v4.42, Please use `text_config.vocab_size` instead.",
+                FutureWarning,
+            )
+            return self._vocab_size
+
+        def to_dict(self):
+            output = super().to_dict()
+            output.pop("_vocab_size", None)
+            return output

@@ -15,6 +15,7 @@
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Union
 
 from .generation.configuration_utils import GenerationConfig
 from .training_args import TrainingArguments
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 @add_start_docstrings(TrainingArguments.__doc__)
 class Seq2SeqTrainingArguments(TrainingArguments):
     """
+    Args:
         sortish_sampler (`bool`, *optional*, defaults to `False`):
             Whether to use a *sortish sampler* or not. Only possible if the underlying datasets are *Seq2SeqDataset*
             for now but will become generally available in the near future.
@@ -50,13 +52,13 @@ class Seq2SeqTrainingArguments(TrainingArguments):
             - a path to a *directory* containing a configuration file saved using the
               [`~GenerationConfig.save_pretrained`] method, e.g., `./my_model_directory/`.
             - a [`~generation.GenerationConfig`] object.
-    """  # fmt: skip  # Prevent Ruff from altering the indentation
+    """
 
     sortish_sampler: bool = field(default=False, metadata={"help": "Whether to use SortishSampler or not."})
     predict_with_generate: bool = field(
         default=False, metadata={"help": "Whether to use generate to calculate generative metrics (ROUGE, BLEU)."}
     )
-    generation_max_length: int | None = field(
+    generation_max_length: Optional[int] = field(
         default=None,
         metadata={
             "help": (
@@ -65,7 +67,7 @@ class Seq2SeqTrainingArguments(TrainingArguments):
             )
         },
     )
-    generation_num_beams: int | None = field(
+    generation_num_beams: Optional[int] = field(
         default=None,
         metadata={
             "help": (
@@ -74,7 +76,7 @@ class Seq2SeqTrainingArguments(TrainingArguments):
             )
         },
     )
-    generation_config: str | Path | GenerationConfig | None = field(
+    generation_config: Optional[Union[str, Path, GenerationConfig]] = field(
         default=None,
         metadata={
             "help": "Model id, file path or url pointing to a GenerationConfig json file, to use during prediction."

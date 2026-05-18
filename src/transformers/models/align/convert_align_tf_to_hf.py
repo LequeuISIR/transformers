@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +16,10 @@
 
 import argparse
 import os
-from io import BytesIO
 
 import align
-import httpx
 import numpy as np
+import requests
 import tensorflow as tf
 import torch
 from PIL import Image
@@ -56,16 +56,17 @@ def get_align_config():
     vision_config.depthwise_padding = []
 
     text_config = BertConfig()
-    config = AlignConfig(text_config=text_config, vision_config=vision_config, projection_dim=640)
+    config = AlignConfig.from_text_vision_configs(
+        text_config=text_config, vision_config=vision_config, projection_dim=640
+    )
     return config
 
 
 # We will verify our results on an image of cute cats
 def prepare_img():
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    with httpx.stream("GET", url) as response:
-        image = Image.open(BytesIO(response.read()))
-    return image
+    im = Image.open(requests.get(url, stream=True).raw)
+    return im
 
 
 def get_processor():
@@ -274,7 +275,7 @@ def replace_params(hf_params, tf_params, key_mapping):
             new_hf_value = torch.from_numpy(np.transpose(value))
         elif "temperature" in key:
             new_hf_value = value
-        elif "bn/gamma" in key or "bn/beta" in key:
+        elif "bn/gamma" or "bn/beta" in key:
             new_hf_value = torch.from_numpy(np.transpose(value)).squeeze()
         else:
             new_hf_value = torch.from_numpy(value)

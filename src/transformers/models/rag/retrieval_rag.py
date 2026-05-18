@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2020, The RAG Authors and The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,11 +17,11 @@
 import os
 import pickle
 import time
-from collections.abc import Iterable
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from ...tokenization_python import PreTrainedTokenizer
+from ...tokenization_utils import PreTrainedTokenizer
 from ...tokenization_utils_base import BatchEncoding
 from ...utils import cached_file, is_datasets_available, is_faiss_available, logging, requires_backends, strtobool
 from .configuration_rag import RagConfig
@@ -45,7 +46,7 @@ class Index:
     A base class for the Indices encapsulated by the [`RagRetriever`].
     """
 
-    def get_doc_dicts(self, doc_ids: np.ndarray) -> list[dict]:
+    def get_doc_dicts(self, doc_ids: np.ndarray) -> List[dict]:
         """
         Returns a list of dictionaries, containing titles and text of the retrieved documents.
 
@@ -55,7 +56,7 @@ class Index:
         """
         raise NotImplementedError
 
-    def get_top_docs(self, question_hidden_states: np.ndarray, n_docs=5) -> tuple[np.ndarray, np.ndarray]:
+    def get_top_docs(self, question_hidden_states: np.ndarray, n_docs=5) -> Tuple[np.ndarray, np.ndarray]:
         """
         For each query in the batch, retrieves `n_docs` documents.
 
@@ -102,7 +103,6 @@ class LegacyIndex(Index):
     PASSAGE_FILENAME = "psgs_w100.tsv.pkl"
 
     def __init__(self, vector_size, index_path):
-        requires_backends(self, ["faiss"])
         self.index_id_to_db_id = []
         self.index_path = index_path
         self.passages = self._load_passages()
@@ -115,13 +115,13 @@ class LegacyIndex(Index):
         try:
             # Load from URL or cache if already cached
             resolved_archive_file = cached_file(index_path, filename)
-        except OSError:
+        except EnvironmentError:
             msg = (
                 f"Can't load '{filename}'. Make sure that:\n\n"
                 f"- '{index_path}' is a correct remote path to a directory containing a file named {filename}\n\n"
                 f"- or '{index_path}' is the correct path to a directory containing a file named {filename}.\n\n"
             )
-            raise OSError(msg)
+            raise EnvironmentError(msg)
         if is_local:
             logger.info(f"loading file {resolved_archive_file}")
         else:
@@ -156,9 +156,9 @@ class LegacyIndex(Index):
             )
         with open(resolved_meta_path, "rb") as metadata_file:
             self.index_id_to_db_id = pickle.load(metadata_file)
-        assert len(self.index_id_to_db_id) == self.index.ntotal, (
-            "Deserialized index_id_to_db_id should match faiss index size"
-        )
+        assert (
+            len(self.index_id_to_db_id) == self.index.ntotal
+        ), "Deserialized index_id_to_db_id should match faiss index size"
 
     def is_initialized(self):
         return self._index_initialized
@@ -171,7 +171,7 @@ class LegacyIndex(Index):
         self._deserialize_index()
         self._index_initialized = True
 
-    def get_doc_dicts(self, doc_ids: np.ndarray):
+    def get_doc_dicts(self, doc_ids: np.array):
         doc_list = []
         for doc_ids_i in doc_ids:
             ids = [str(int(doc_id)) for doc_id in doc_ids_i]
@@ -185,7 +185,7 @@ class LegacyIndex(Index):
             doc_dicts.append(doc_dict)
         return doc_dicts
 
-    def get_top_docs(self, question_hidden_states: np.ndarray, n_docs=5) -> tuple[np.ndarray, np.ndarray]:
+    def get_top_docs(self, question_hidden_states: np.ndarray, n_docs=5) -> Tuple[np.ndarray, np.ndarray]:
         aux_dim = np.zeros(len(question_hidden_states), dtype="float32").reshape(-1, 1)
         query_nhsw_vectors = np.hstack((question_hidden_states, aux_dim))
         _, docs_ids = self.index.search(query_nhsw_vectors, n_docs)
@@ -196,7 +196,6 @@ class LegacyIndex(Index):
 
 class HFIndexBase(Index):
     def __init__(self, vector_size, dataset, index_initialized=False):
-        requires_backends(self, ["faiss"])
         self.vector_size = vector_size
         self.dataset = dataset
         self._index_initialized = index_initialized
@@ -205,7 +204,7 @@ class HFIndexBase(Index):
 
     def _check_dataset_format(self, with_index: bool):
         if not isinstance(self.dataset, Dataset):
-            raise TypeError(f"Dataset should be a datasets.Dataset object, but got {type(self.dataset)}")
+            raise ValueError(f"Dataset should be a datasets.Dataset object, but got {type(self.dataset)}")
         if len({"title", "text", "embeddings"} - set(self.dataset.column_names)) > 0:
             raise ValueError(
                 "Dataset should be a dataset with the following columns: "
@@ -224,10 +223,10 @@ class HFIndexBase(Index):
     def is_initialized(self):
         return self._index_initialized
 
-    def get_doc_dicts(self, doc_ids: np.ndarray) -> list[dict]:
+    def get_doc_dicts(self, doc_ids: np.ndarray) -> List[dict]:
         return [self.dataset[doc_ids[i].tolist()] for i in range(doc_ids.shape[0])]
 
-    def get_top_docs(self, question_hidden_states: np.ndarray, n_docs=5) -> tuple[np.ndarray, np.ndarray]:
+    def get_top_docs(self, question_hidden_states: np.ndarray, n_docs=5) -> Tuple[np.ndarray, np.ndarray]:
         _, ids = self.dataset.search_batch("embeddings", question_hidden_states, n_docs)
         docs = [self.dataset[[i for i in indices if i >= 0]] for indices in ids]
         vectors = [doc["embeddings"] for doc in docs]
@@ -264,12 +263,11 @@ class CanonicalHFIndex(HFIndexBase):
         vector_size: int,
         dataset_name: str = "wiki_dpr",
         dataset_split: str = "train",
-        index_name: str | None = None,
-        index_path: str | None = None,
+        index_name: Optional[str] = None,
+        index_path: Optional[str] = None,
         use_dummy_dataset=False,
         dataset_revision=None,
     ):
-        requires_backends(self, ["faiss"])
         if int(index_path is None) + int(index_name is None) != 1:
             raise ValueError("Please provide `index_name` or `index_path`.")
         self.dataset_name = dataset_name
@@ -322,7 +320,6 @@ class CustomHFIndex(HFIndexBase):
     """
 
     def __init__(self, vector_size: int, dataset, index_path=None):
-        requires_backends(self, ["faiss"])
         super().__init__(vector_size, dataset, index_initialized=index_path is None)
         self.index_path = index_path
 
@@ -377,14 +374,14 @@ class RagRetriever:
 
     >>> dataset = (
     ...     ...
-    ... )  # dataset must be a datasets.Datasets object with columns "title", "text" and "embeddings", and it must have a supported index (e.g., Faiss or other index types depending on your setup)
+    ... )  # dataset must be a datasets.Datasets object with columns "title", "text" and "embeddings", and it must have a faiss index
     >>> retriever = RagRetriever.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base", indexed_dataset=dataset)
 
     >>> # To load your own indexed dataset built with the datasets library that was saved on disk. More info in examples/rag/use_own_knowledge_dataset.py
     >>> from transformers import RagRetriever
 
     >>> dataset_path = "path/to/my/dataset"  # dataset saved via *dataset.save_to_disk(...)*
-    >>> index_path = "path/to/my/index"  # index saved via *dataset.get_index("embeddings").save(...)*
+    >>> index_path = "path/to/my/index.faiss"  # faiss index saved via *dataset.get_index("embeddings").save(...)*
     >>> retriever = RagRetriever.from_pretrained(
     ...     "facebook/dpr-ctx_encoder-single-nq-base",
     ...     index_name="custom",
@@ -400,7 +397,7 @@ class RagRetriever:
 
     def __init__(self, config, question_encoder_tokenizer, generator_tokenizer, index=None, init_retrieval=True):
         self._init_retrieval = init_retrieval
-        requires_backends(self, ["datasets"])
+        requires_backends(self, ["datasets", "faiss"])
         super().__init__()
         self.index = index or self._build_index(config)
         self.generator_tokenizer = generator_tokenizer
@@ -442,7 +439,7 @@ class RagRetriever:
 
     @classmethod
     def from_pretrained(cls, retriever_name_or_path, indexed_dataset=None, **kwargs):
-        requires_backends(cls, ["datasets"])
+        requires_backends(cls, ["datasets", "faiss"])
         config = kwargs.pop("config", None) or RagConfig.from_pretrained(retriever_name_or_path, **kwargs)
         rag_tokenizer = RagTokenizer.from_pretrained(retriever_name_or_path, config=config)
         question_encoder_tokenizer = rag_tokenizer.question_encoder
@@ -507,7 +504,10 @@ class RagRetriever:
         def cat_input_and_doc(doc_title, doc_text, input_string, prefix):
             # TODO(Patrick): if we train more RAG models, I want to put the input first to take advantage of effortless truncation
             # TODO(piktus): better handling of truncation
-            doc_title = doc_title.removeprefix('"').removesuffix('"')
+            if doc_title.startswith('"'):
+                doc_title = doc_title[1:]
+            if doc_title.endswith('"'):
+                doc_title = doc_title[:-1]
             if prefix is None:
                 prefix = ""
             out = (prefix + doc_title + self.config.title_sep + doc_text + self.config.doc_sep + input_string).replace(
@@ -526,7 +526,7 @@ class RagRetriever:
             for j in range(n_docs)
         ]
 
-        contextualized_inputs = self.generator_tokenizer(
+        contextualized_inputs = self.generator_tokenizer.batch_encode_plus(
             rag_input_strings,
             max_length=self.config.max_combined_length,
             return_tensors=return_tensors,
@@ -536,10 +536,10 @@ class RagRetriever:
 
         return contextualized_inputs["input_ids"], contextualized_inputs["attention_mask"]
 
-    def _chunk_tensor(self, t: Iterable, chunk_size: int) -> list[Iterable]:
+    def _chunk_tensor(self, t: Iterable, chunk_size: int) -> List[Iterable]:
         return [t[i : i + chunk_size] for i in range(0, len(t), chunk_size)]
 
-    def _main_retrieve(self, question_hidden_states: np.ndarray, n_docs: int) -> tuple[np.ndarray, np.ndarray]:
+    def _main_retrieve(self, question_hidden_states: np.ndarray, n_docs: int) -> Tuple[np.ndarray, np.ndarray]:
         question_hidden_states_batched = self._chunk_tensor(question_hidden_states, self.batch_size)
         ids_batched = []
         vectors_batched = []
@@ -556,7 +556,7 @@ class RagRetriever:
             np.array(vectors_batched),
         )  # shapes (batch_size, n_docs) and (batch_size, n_docs, d)
 
-    def retrieve(self, question_hidden_states: np.ndarray, n_docs: int) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    def retrieve(self, question_hidden_states: np.ndarray, n_docs: int) -> Tuple[np.ndarray, List[dict]]:
         """
         Retrieves documents for specified `question_hidden_states`.
 
@@ -567,12 +567,12 @@ class RagRetriever:
                 The number of docs retrieved per query.
 
         Return:
-            `tuple[np.ndarray, np.ndarray, list[dict]]`: A tuple with the following objects:
+            `Tuple[np.ndarray, np.ndarray, List[dict]]`: A tuple with the following objects:
 
             - **retrieved_doc_embeds** (`np.ndarray` of shape `(batch_size, n_docs, dim)`) -- The retrieval embeddings
               of the retrieved docs per query.
             - **doc_ids** (`np.ndarray` of shape `(batch_size, n_docs)`) -- The ids of the documents in the index
-            - **doc_dicts** (`list[dict]`): The `retrieved_doc_embeds` examples per query.
+            - **doc_dicts** (`List[dict]`): The `retrieved_doc_embeds` examples per query.
         """
 
         doc_ids, retrieved_doc_embeds = self._main_retrieve(question_hidden_states, n_docs)
@@ -585,7 +585,7 @@ class RagRetriever:
 
     def __call__(
         self,
-        question_input_ids: list[list[int]],
+        question_input_ids: List[List[int]],
         question_hidden_states: np.ndarray,
         prefix=None,
         n_docs=None,
@@ -595,7 +595,7 @@ class RagRetriever:
         Retrieves documents for specified `question_hidden_states`.
 
         Args:
-            question_input_ids (`list[list[int]]`) batch of input ids
+            question_input_ids (`List[List[int]]`) batch of input ids
             question_hidden_states (`np.ndarray` of shape `(batch_size, vector_size)`:
                 A batch of query vectors to retrieve with.
             prefix (`str`, *optional*):
@@ -605,6 +605,7 @@ class RagRetriever:
             return_tensors (`str` or [`~utils.TensorType`], *optional*, defaults to "pt"):
                 If set, will return tensors instead of list of python integers. Acceptable values are:
 
+                - `'tf'`: Return TensorFlow `tf.constant` objects.
                 - `'pt'`: Return PyTorch `torch.Tensor` objects.
                 - `'np'`: Return Numpy `np.ndarray` objects.
 
@@ -624,10 +625,10 @@ class RagRetriever:
         """
 
         n_docs = n_docs if n_docs is not None else self.n_docs
-        prefix = prefix if prefix is not None else getattr(self.config.generator, "prefix", None)
+        prefix = prefix if prefix is not None else self.config.generator.prefix
         retrieved_doc_embeds, doc_ids, docs = self.retrieve(question_hidden_states, n_docs)
 
-        input_strings = self.question_encoder_tokenizer.decode(question_input_ids, skip_special_tokens=True)
+        input_strings = self.question_encoder_tokenizer.batch_decode(question_input_ids, skip_special_tokens=True)
         context_input_ids, context_attention_mask = self.postprocess_docs(
             docs, input_strings, prefix, n_docs, return_tensors=return_tensors
         )
@@ -671,6 +672,3 @@ class RagRetriever:
                 },
                 tensor_type=return_tensors,
             )
-
-
-__all__ = ["RagRetriever"]

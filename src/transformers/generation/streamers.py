@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,16 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
-import asyncio
-import sys
 from queue import Queue
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Optional
 
 
 if TYPE_CHECKING:
-    from ..tokenization_utils_base import PreTrainedTokenizerBase
+    from ..models.auto import AutoTokenizer
 
 
 class BaseStreamer:
@@ -50,7 +47,7 @@ class TextStreamer(BaseStreamer):
 
     Parameters:
         tokenizer (`AutoTokenizer`):
-            The tokenizer used to decode the tokens.
+            The tokenized used to decode the tokens.
         skip_prompt (`bool`, *optional*, defaults to `False`):
             Whether to skip the prompt to `.generate()` or not. Useful e.g. for chatbots.
         decode_kwargs (`dict`, *optional*):
@@ -72,13 +69,13 @@ class TextStreamer(BaseStreamer):
         ```
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, skip_prompt: bool = False, **decode_kwargs: Any):
+    def __init__(self, tokenizer: "AutoTokenizer", skip_prompt: bool = False, **decode_kwargs):
         self.tokenizer = tokenizer
         self.skip_prompt = skip_prompt
         self.decode_kwargs = decode_kwargs
 
         # variables used in the streaming process
-        self.token_cache: list[int] = []
+        self.token_cache = []
         self.print_len = 0
         self.next_tokens_are_prompt = True
 
@@ -97,7 +94,7 @@ class TextStreamer(BaseStreamer):
 
         # Add the new token to the cache and decodes the entire thing.
         self.token_cache.extend(value.tolist())
-        text = cast(str, self.tokenizer.decode(self.token_cache, **self.decode_kwargs))
+        text = self.tokenizer.decode(self.token_cache, **self.decode_kwargs)
 
         # After the symbol for a new line, we flush the cache.
         if text.endswith("\n"):
@@ -120,7 +117,7 @@ class TextStreamer(BaseStreamer):
         """Flushes any remaining cache and prints a newline to stdout."""
         # Flush the cache, if it exists
         if len(self.token_cache) > 0:
-            text = cast(str, self.tokenizer.decode(self.token_cache, **self.decode_kwargs))
+            text = self.tokenizer.decode(self.token_cache, **self.decode_kwargs)
             printable_text = text[self.print_len :]
             self.token_cache = []
             self.print_len = 0
@@ -146,14 +143,14 @@ class TextStreamer(BaseStreamer):
         # like the all of the other languages.
         if (
             (cp >= 0x4E00 and cp <= 0x9FFF)
-            or (cp >= 0x3400 and cp <= 0x4DBF)
-            or (cp >= 0x20000 and cp <= 0x2A6DF)
-            or (cp >= 0x2A700 and cp <= 0x2B73F)
-            or (cp >= 0x2B740 and cp <= 0x2B81F)
-            or (cp >= 0x2B820 and cp <= 0x2CEAF)
+            or (cp >= 0x3400 and cp <= 0x4DBF)  #
+            or (cp >= 0x20000 and cp <= 0x2A6DF)  #
+            or (cp >= 0x2A700 and cp <= 0x2B73F)  #
+            or (cp >= 0x2B740 and cp <= 0x2B81F)  #
+            or (cp >= 0x2B820 and cp <= 0x2CEAF)  #
             or (cp >= 0xF900 and cp <= 0xFAFF)
-            or (cp >= 0x2F800 and cp <= 0x2FA1F)
-        ):
+            or (cp >= 0x2F800 and cp <= 0x2FA1F)  #
+        ):  #
             return True
 
         return False
@@ -162,7 +159,7 @@ class TextStreamer(BaseStreamer):
 class TextIteratorStreamer(TextStreamer):
     """
     Streamer that stores print-ready text in a queue, to be used by a downstream application as an iterator. This is
-    useful for applications that benefit from accessing the generated text in a non-blocking way (e.g. in an interactive
+    useful for applications that benefit from acessing the generated text in a non-blocking way (e.g. in an interactive
     Gradio demo).
 
     <Tip warning={true}>
@@ -173,7 +170,7 @@ class TextIteratorStreamer(TextStreamer):
 
     Parameters:
         tokenizer (`AutoTokenizer`):
-            The tokenizer used to decode the tokens.
+            The tokenized used to decode the tokens.
         skip_prompt (`bool`, *optional*, defaults to `False`):
             Whether to skip the prompt to `.generate()` or not. Useful e.g. for chatbots.
         timeout (`float`, *optional*):
@@ -206,11 +203,7 @@ class TextIteratorStreamer(TextStreamer):
     """
 
     def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        skip_prompt: bool = False,
-        timeout: float | None = None,
-        **decode_kwargs: Any,
+        self, tokenizer: "AutoTokenizer", skip_prompt: bool = False, timeout: Optional[float] = None, **decode_kwargs
     ):
         super().__init__(tokenizer, skip_prompt, **decode_kwargs)
         self.text_queue = Queue()
@@ -232,97 +225,3 @@ class TextIteratorStreamer(TextStreamer):
             raise StopIteration()
         else:
             return value
-
-
-class AsyncTextIteratorStreamer(TextStreamer):
-    """
-    Streamer that stores print-ready text in a queue, to be used by a downstream application as an async iterator.
-    This is useful for applications that benefit from accessing the generated text asynchronously (e.g. in an
-    interactive Gradio demo).
-
-    <Tip warning={true}>
-
-    The API for the streamer classes is still under development and may change in the future.
-
-    </Tip>
-
-    Parameters:
-        tokenizer (`AutoTokenizer`):
-            The tokenizer used to decode the tokens.
-        skip_prompt (`bool`, *optional*, defaults to `False`):
-            Whether to skip the prompt to `.generate()` or not. Useful e.g. for chatbots.
-        timeout (`float`, *optional*):
-            The timeout for the text queue. If `None`, the queue will block indefinitely. Useful to handle exceptions
-            in `.generate()`, when it is called in a separate thread.
-        decode_kwargs (`dict`, *optional*):
-            Additional keyword arguments to pass to the tokenizer's `decode` method.
-
-    Raises:
-        TimeoutError: If token generation time exceeds timeout value.
-
-    Examples:
-
-        ```python
-        >>> from transformers import AutoModelForCausalLM, AutoTokenizer, AsyncTextIteratorStreamer
-        >>> from threading import Thread
-        >>> import asyncio
-
-        >>> tok = AutoTokenizer.from_pretrained("openai-community/gpt2")
-        >>> model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
-        >>> inputs = tok(["An increasing sequence: one,"], return_tensors="pt")
-
-        >>> # Run the generation in a separate thread, so that we can fetch the generated text in a non-blocking way.
-        >>> async def main():
-        ...     # Important: AsyncTextIteratorStreamer must be initialized inside a coroutine!
-        ...     streamer = AsyncTextIteratorStreamer(tok)
-        ...     generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=20)
-        ...     thread = Thread(target=model.generate, kwargs=generation_kwargs)
-        ...     thread.start()
-        ...     generated_text = ""
-        ...     async for new_text in streamer:
-        ...         generated_text += new_text
-        >>>     print(generated_text)
-        >>> asyncio.run(main())
-        An increasing sequence: one, two, three, four, five, six, seven, eight, nine, ten, eleven,
-        ```
-    """
-
-    def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        skip_prompt: bool = False,
-        timeout: float | None = None,
-        **decode_kwargs: Any,
-    ):
-        super().__init__(tokenizer, skip_prompt, **decode_kwargs)
-        self.text_queue = asyncio.Queue()
-        self.stop_signal = None
-        self.timeout = timeout
-        self.loop = asyncio.get_running_loop()
-        timeout_context = getattr(asyncio, "timeout", None)
-        self.has_asyncio_timeout = sys.version_info >= (3, 11) and callable(timeout_context)
-        self.asyncio_timeout = timeout_context if self.has_asyncio_timeout else None
-
-    def on_finalized_text(self, text: str, stream_end: bool = False):
-        """Put the new text in the queue. If the stream is ending, also put a stop signal in the queue."""
-        self.loop.call_soon_threadsafe(self.text_queue.put_nowait, text)
-        if stream_end:
-            self.loop.call_soon_threadsafe(self.text_queue.put_nowait, self.stop_signal)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        try:
-            if self.has_asyncio_timeout and self.asyncio_timeout is not None:
-                async with self.asyncio_timeout(self.timeout):
-                    value = await self.text_queue.get()
-            else:
-                value = await asyncio.wait_for(self.text_queue.get(), timeout=self.timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError()
-        else:
-            if value == self.stop_signal:
-                raise StopAsyncIteration()
-            else:
-                return value

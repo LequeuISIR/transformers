@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2020 Hugging Face
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,24 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import re
 import time
-from typing import Optional, TypeVar
+from typing import Optional
 
 import IPython.display as disp
 
 from ..trainer_callback import TrainerCallback
 from ..trainer_utils import IntervalStrategy, has_length
-
-
-_T = TypeVar("_T")
-
-
-def _require(x: _T | None, msg: str) -> _T:
-    if x is None:
-        raise RuntimeError(msg)
-    return x
 
 
 def format_time(t):
@@ -110,7 +101,7 @@ class NotebookProgressBar:
     def __init__(
         self,
         total: int,
-        prefix: str | None = None,
+        prefix: Optional[str] = None,
         leave: bool = True,
         parent: Optional["NotebookTrainingTracker"] = None,
         width: int = 300,
@@ -123,13 +114,8 @@ class NotebookProgressBar:
         self.last_value = None
         self.comment = None
         self.output = None
-        self.value = None
-        self.label = None
-        if "VSCODE_PID" in os.environ:
-            self.update_every = 0.5  # Adjusted for smooth updated as html rending is slow on VS Code
-            # This is the only adjustment required to optimize training html rending
 
-    def update(self, value: int, force_update: bool = False, comment: str | None = None):
+    def update(self, value: int, force_update: bool = False, comment: str = None):
         """
         The main method to update the progress bar to `value`.
 
@@ -194,7 +180,7 @@ class NotebookProgressBar:
             if self.average_time_per_item == 0:
                 self.label += ", +inf it/s"
             else:
-                self.label += f", {1 / self.average_time_per_item:.2f} it/s"
+                self.label += f", {1/self.average_time_per_item:.2f} it/s"
 
         self.label += "]" if self.comment is None or len(self.comment) == 0 else f", {self.comment}]"
         self.display()
@@ -221,7 +207,7 @@ class NotebookTrainingTracker(NotebookProgressBar):
     An object tracking the updates of an ongoing training with progress bars and a nice table reporting metrics.
 
     Args:
-        num_steps (`int`): The number of steps during training. column_names (`list[str]`, *optional*):
+        num_steps (`int`): The number of steps during training. column_names (`List[str]`, *optional*):
             The list of column names for the metrics table (will be inferred from the first call to
             [`~utils.notebook.NotebookTrainingTracker.write_line`] if not set).
     """
@@ -247,13 +233,13 @@ class NotebookTrainingTracker(NotebookProgressBar):
         Write the values in the inner table.
 
         Args:
-            values (`dict[str, float]`): The values to display.
+            values (`Dict[str, float]`): The values to display.
         """
         if self.inner_table is None:
             self.inner_table = [list(values.keys()), list(values.values())]
         else:
             columns = self.inner_table[0]
-            for key in values:
+            for key in values.keys():
                 if key not in columns:
                     columns.append(key)
             self.inner_table[0] = columns
@@ -262,12 +248,12 @@ class NotebookTrainingTracker(NotebookProgressBar):
                 first_column = self.inner_table[0][0]
                 if last_values[0] != values[first_column]:
                     # write new line
-                    self.inner_table.append([values.get(c, "No Log") for c in columns])
+                    self.inner_table.append([values[c] if c in values else "No Log" for c in columns])
                 else:
                     # update last line
                     new_values = values
                     for c in columns:
-                        if c not in new_values:
+                        if c not in new_values.keys():
                             new_values[c] = last_values[columns.index(c)]
                     self.inner_table[-1] = [new_values[c] for c in columns]
             else:
@@ -306,18 +292,17 @@ class NotebookProgressCallback(TrainerCallback):
         self._force_next_update = False
 
     def on_train_begin(self, args, state, control, **kwargs):
-        self.first_column = "Epoch" if args.eval_strategy == IntervalStrategy.EPOCH else "Step"
+        self.first_column = "Epoch" if args.evaluation_strategy == IntervalStrategy.EPOCH else "Step"
         self.training_loss = 0
         self.last_log = 0
         column_names = [self.first_column] + ["Training Loss"]
-        if args.eval_strategy != IntervalStrategy.NO:
+        if args.evaluation_strategy != IntervalStrategy.NO:
             column_names.append("Validation Loss")
         self.training_tracker = NotebookTrainingTracker(state.max_steps, column_names)
 
     def on_step_end(self, args, state, control, **kwargs):
         epoch = int(state.epoch) if int(state.epoch) == state.epoch else f"{state.epoch:.2f}"
-        tt = _require(self.training_tracker, "on_train_begin must be called before on_step_end")
-        tt.update(
+        self.training_tracker.update(
             state.global_step + 1,
             comment=f"Epoch {epoch}/{state.num_train_epochs}",
             force_update=self._force_next_update,
@@ -343,64 +328,49 @@ class NotebookProgressCallback(TrainerCallback):
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         # Only for when there is no evaluation
-        if args.eval_strategy == IntervalStrategy.NO and "loss" in logs:
-            tt = _require(self.training_tracker, "on_train_begin must be called before on_log")
+        if args.evaluation_strategy == IntervalStrategy.NO and "loss" in logs:
             values = {"Training Loss": logs["loss"]}
             # First column is necessarily Step sine we're not in epoch eval strategy
             values["Step"] = state.global_step
-            tt.write_line(values)
+            self.training_tracker.write_line(values)
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        # Recompute first_column here since on_evaluate can be called before on_train_begin,
-        # where it is normally initialized.
-        self.first_column = "Epoch" if args.eval_strategy == IntervalStrategy.EPOCH else "Step"
-
-        values = {"Training Loss": "No log", "Validation Loss": "No log"}
-        for log in reversed(state.log_history):
-            if "loss" in log:
-                values["Training Loss"] = log["loss"]
-                break
-
-        if self.first_column == "Epoch":
-            values["Epoch"] = int(state.epoch)
-        else:
-            values["Step"] = state.global_step
-        if metrics is None:
-            metrics = {}
-        metric_key_prefix = "eval"
-        for k in metrics:
-            if k.endswith("_loss"):
-                metric_key_prefix = re.sub(r"\_loss$", "", k)
-        _ = metrics.pop("total_flos", None)
-        _ = metrics.pop("epoch", None)
-        _ = metrics.pop(f"{metric_key_prefix}_runtime", None)
-        _ = metrics.pop(f"{metric_key_prefix}_samples_per_second", None)
-        _ = metrics.pop(f"{metric_key_prefix}_steps_per_second", None)
-        _ = metrics.pop(f"{metric_key_prefix}_model_preparation_time", None)
-
-        for k, v in metrics.items():
-            splits = k.split("_")
-            name = " ".join([part.capitalize() for part in splits[1:]])
-            if name == "Loss":
-                # Single dataset
-                name = "Validation Loss"
-            values[name] = v
-
         if self.training_tracker is not None:
-            tt = self.training_tracker
-            tt.write_line(values)
-            tt.remove_child()
+            values = {"Training Loss": "No log", "Validation Loss": "No log"}
+            for log in reversed(state.log_history):
+                if "loss" in log:
+                    values["Training Loss"] = log["loss"]
+                    break
+
+            if self.first_column == "Epoch":
+                values["Epoch"] = int(state.epoch)
+            else:
+                values["Step"] = state.global_step
+            metric_key_prefix = "eval"
+            for k in metrics:
+                if k.endswith("_loss"):
+                    metric_key_prefix = re.sub(r"\_loss$", "", k)
+            _ = metrics.pop("total_flos", None)
+            _ = metrics.pop("epoch", None)
+            _ = metrics.pop(f"{metric_key_prefix}_runtime", None)
+            _ = metrics.pop(f"{metric_key_prefix}_samples_per_second", None)
+            _ = metrics.pop(f"{metric_key_prefix}_steps_per_second", None)
+            _ = metrics.pop(f"{metric_key_prefix}_jit_compilation_time", None)
+            for k, v in metrics.items():
+                splits = k.split("_")
+                name = " ".join([part.capitalize() for part in splits[1:]])
+                if name == "Loss":
+                    # Single dataset
+                    name = "Validation Loss"
+                values[name] = v
+            self.training_tracker.write_line(values)
+            self.training_tracker.remove_child()
+            self.prediction_bar = None
             # Evaluation takes a long time so we should force the next update.
             self._force_next_update = True
-        else:
-            # No training tracker, but still show the metrics
-            disp.display(disp.HTML(text_to_html_table([list(values.keys()), list(values.values())])))
-
-        self.prediction_bar = None
 
     def on_train_end(self, args, state, control, **kwargs):
-        tt = _require(self.training_tracker, "on_train_begin must be called before on_train_end")
-        tt.update(
+        self.training_tracker.update(
             state.global_step,
             comment=f"Epoch {int(state.epoch)}/{state.num_train_epochs}",
             force_update=True,

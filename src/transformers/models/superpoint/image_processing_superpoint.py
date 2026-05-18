@@ -13,152 +13,260 @@
 # limitations under the License.
 """Image processor class for SuperPoint."""
 
-from typing import TYPE_CHECKING
+from typing import Dict, Optional, Union
 
-import torch
+import numpy as np
 
-from ...image_processing_backends import TorchvisionBackend
-from ...image_processing_utils import BatchFeature
-from ...image_transforms import group_images_by_shape, reorder_images
-from ...image_utils import PILImageResampling, SizeDict
-from ...processing_utils import ImagesKwargs, Unpack
-from ...utils import TensorType, auto_docstring
+from ... import is_vision_available, requires_backends
+from ...image_processing_utils import BaseImageProcessor, BatchFeature, get_size_dict
+from ...image_transforms import resize, to_channel_dimension_format
+from ...image_utils import (
+    ChannelDimension,
+    ImageInput,
+    infer_channel_dimension_format,
+    is_scaled_image,
+    make_list_of_images,
+    to_numpy_array,
+    valid_images,
+)
+from ...utils import TensorType, logging
 
 
-if TYPE_CHECKING:
-    from .modeling_superpoint import SuperPointKeypointDescriptionOutput
+if is_vision_available():
+    import PIL
 
-from torchvision.transforms.v2 import functional as tvF
+logger = logging.get_logger(__name__)
 
 
-class SuperPointImageProcessorKwargs(ImagesKwargs, total=False):
-    r"""
-    do_grayscale (`bool`, *optional*, defaults to `self.do_grayscale`):
-        Whether to convert the image to grayscale. Can be overridden by `do_grayscale` in the `preprocess` method.
+def is_grayscale(
+    image: ImageInput,
+    input_data_format: Optional[Union[str, ChannelDimension]] = None,
+):
+    if input_data_format == ChannelDimension.FIRST:
+        return np.all(image[0, ...] == image[1, ...]) and np.all(image[1, ...] == image[2, ...])
+    elif input_data_format == ChannelDimension.LAST:
+        return np.all(image[..., 0] == image[..., 1]) and np.all(image[..., 1] == image[..., 2])
+
+
+def convert_to_grayscale(
+    image: ImageInput,
+    input_data_format: Optional[Union[str, ChannelDimension]] = None,
+) -> ImageInput:
     """
-
-    do_grayscale: bool
-
-
-def is_grayscale(image: "torch.Tensor") -> bool:
-    """Checks if an image is grayscale (all RGB channels are identical)."""
-    if image.ndim < 3 or image.shape[0 if image.ndim == 3 else 1] == 1:
-        return True
-    return torch.all(image[..., 0, :, :] == image[..., 1, :, :]) and torch.all(
-        image[..., 1, :, :] == image[..., 2, :, :]
-    )
-
-
-def convert_to_grayscale(image: "torch.Tensor") -> "torch.Tensor":
-    """
-    Converts an image to grayscale format using the NTSC formula. Only support torch.Tensor.
+    Converts an image to grayscale format using the NTSC formula. Only support numpy and PIL Image. TODO support torch
+    and tensorflow grayscale conversion
 
     This function is supposed to return a 1-channel image, but it returns a 3-channel image with the same value in each
     channel, because of an issue that is discussed in :
     https://github.com/huggingface/transformers/pull/25786#issuecomment-1730176446
 
     Args:
-        image (torch.Tensor):
+        image (Image):
             The image to convert.
+        input_data_format (`ChannelDimension` or `str`, *optional*):
+            The channel dimension format for the input image.
     """
-    if is_grayscale(image):
+    requires_backends(convert_to_grayscale, ["vision"])
+
+    if isinstance(image, np.ndarray):
+        if input_data_format == ChannelDimension.FIRST:
+            gray_image = image[0, ...] * 0.2989 + image[1, ...] * 0.5870 + image[2, ...] * 0.1140
+            gray_image = np.stack([gray_image] * 3, axis=0)
+        elif input_data_format == ChannelDimension.LAST:
+            gray_image = image[..., 0] * 0.2989 + image[..., 1] * 0.5870 + image[..., 2] * 0.1140
+            gray_image = np.stack([gray_image] * 3, axis=-1)
+        return gray_image
+
+    if not isinstance(image, PIL.Image.Image):
         return image
-    return tvF.rgb_to_grayscale(image, num_output_channels=3)
+
+    image = image.convert("L")
+    return image
 
 
-@auto_docstring
-class SuperPointImageProcessor(TorchvisionBackend):
-    valid_kwargs = SuperPointImageProcessorKwargs
-    resample = PILImageResampling.BILINEAR
-    size = {"height": 480, "width": 640}
-    default_to_square = False
-    do_resize = True
-    do_rescale = True
-    rescale_factor = 1 / 255
-    do_normalize = None
-    do_grayscale = False
+class SuperPointImageProcessor(BaseImageProcessor):
+    r"""
+    Constructs a SuperPoint image processor.
 
-    def __init__(self, **kwargs: Unpack[SuperPointImageProcessorKwargs]):
-        super().__init__(**kwargs)
+    Args:
+        do_resize (`bool`, *optional*, defaults to `True`):
+            Controls whether to resize the image's (height, width) dimensions to the specified `size`. Can be overriden
+            by `do_resize` in the `preprocess` method.
+        size (`Dict[str, int]` *optional*, defaults to `{"height": 480, "width": 640}`):
+            Resolution of the output image after `resize` is applied. Only has an effect if `do_resize` is set to
+            `True`. Can be overriden by `size` in the `preprocess` method.
+        do_rescale (`bool`, *optional*, defaults to `True`):
+            Whether to rescale the image by the specified scale `rescale_factor`. Can be overriden by `do_rescale` in
+            the `preprocess` method.
+        rescale_factor (`int` or `float`, *optional*, defaults to `1/255`):
+            Scale factor to use if rescaling the image. Can be overriden by `rescale_factor` in the `preprocess`
+            method.
+    """
 
-    def _preprocess(
+    model_input_names = ["pixel_values"]
+
+    def __init__(
         self,
-        images: list["torch.Tensor"],
-        do_resize: bool,
-        size: SizeDict,
-        resample: "PILImageResampling | tvF.InterpolationMode | int | None",
-        do_rescale: bool,
-        rescale_factor: float,
-        disable_grouping: bool | None,
-        return_tensors: str | TensorType | None,
-        do_grayscale: bool = False,
+        do_resize: bool = True,
+        size: Dict[str, int] = None,
+        do_rescale: bool = True,
+        rescale_factor: float = 1 / 255,
         **kwargs,
-    ) -> BatchFeature:
-        # Group images by size for batched processing
-        grouped_images, grouped_images_index = group_images_by_shape(images, disable_grouping=disable_grouping)
-        processed_images_grouped = {}
-        for shape, stacked_images in grouped_images.items():
-            # Apply grayscale conversion before resize (if requested)
-            if do_grayscale:
-                stacked_images = convert_to_grayscale(stacked_images)
-            # Resize
-            if do_resize:
-                stacked_images = self.resize(stacked_images, size=size, resample=resample)
-            # Rescale
-            if do_rescale:
-                stacked_images = self.rescale(stacked_images, rescale_factor)
-            processed_images_grouped[shape] = stacked_images
-        processed_images = reorder_images(processed_images_grouped, grouped_images_index)
-        return BatchFeature(data={"pixel_values": processed_images}, tensor_type=return_tensors)
+    ) -> None:
+        super().__init__(**kwargs)
+        size = size if size is not None else {"height": 480, "width": 640}
+        size = get_size_dict(size, default_to_square=False)
 
-    def post_process_keypoint_detection(
-        self, outputs: "SuperPointKeypointDescriptionOutput", target_sizes: TensorType | list[tuple]
-    ) -> list[dict[str, "torch.Tensor"]]:
+        self.do_resize = do_resize
+        self.size = size
+        self.do_rescale = do_rescale
+        self.rescale_factor = rescale_factor
+
+    def resize(
+        self,
+        image: np.ndarray,
+        size: Dict[str, int],
+        data_format: Optional[Union[str, ChannelDimension]] = None,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        **kwargs,
+    ):
         """
-        Converts the raw output of [`SuperPointForKeypointDetection`] into lists of keypoints, scores and descriptors
-        with coordinates absolute to the original image sizes.
+        Resize an image.
 
         Args:
-            outputs ([`SuperPointKeypointDescriptionOutput`]):
-                Raw outputs of the model containing keypoints in a relative (x, y) format, with scores and descriptors.
-            target_sizes (`torch.Tensor` or `list[tuple[int, int]]`):
-                Tensor of shape `(batch_size, 2)` or list of tuples (`tuple[int, int]`) containing the target size
-                `(height, width)` of each image in the batch. This must be the original
-                image size (before any processing).
-        Returns:
-            `list[Dict]`: A list of dictionaries, each dictionary containing the keypoints in absolute format according
-            to target_sizes, scores and descriptors for an image in the batch as predicted by the model.
+            image (`np.ndarray`):
+                Image to resize.
+            size (`Dict[str, int]`):
+                Dictionary of the form `{"height": int, "width": int}`, specifying the size of the output image.
+            data_format (`ChannelDimension` or `str`, *optional*):
+                The channel dimension format of the output image. If not provided, it will be inferred from the input
+                image. Can be one of:
+                - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
+                - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
+                - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
+            input_data_format (`ChannelDimension` or `str`, *optional*):
+                The channel dimension format for the input image. If unset, the channel dimension format is inferred
+                from the input image. Can be one of:
+                - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
+                - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
+                - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
         """
-        if len(outputs.mask) != len(target_sizes):
-            raise ValueError("Make sure that you pass in as many target sizes as the batch dimension of the mask")
+        size = get_size_dict(size, default_to_square=False)
 
-        if isinstance(target_sizes, list):
-            image_sizes = torch.tensor(target_sizes, device=outputs.mask.device)
-        else:
-            if target_sizes.shape[1] != 2:
-                raise ValueError(
-                    "Each element of target_sizes must contain the size (h, w) of each image of the batch"
-                )
-            image_sizes = target_sizes
+        return resize(
+            image,
+            size=(size["height"], size["width"]),
+            data_format=data_format,
+            input_data_format=input_data_format,
+            **kwargs,
+        )
 
-        # Flip the image sizes to (width, height) and convert keypoints to absolute coordinates
-        image_sizes = torch.flip(image_sizes, [1])
-        masked_keypoints = outputs.keypoints * image_sizes[:, None]
+    def preprocess(
+        self,
+        images,
+        do_resize: bool = None,
+        size: Dict[str, int] = None,
+        do_rescale: bool = None,
+        rescale_factor: float = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        data_format: ChannelDimension = ChannelDimension.FIRST,
+        input_data_format: Optional[Union[str, ChannelDimension]] = None,
+        **kwargs,
+    ) -> BatchFeature:
+        """
+        Preprocess an image or batch of images.
 
-        # Convert masked_keypoints to int
-        masked_keypoints = masked_keypoints.to(torch.int32)
+        Args:
+            images (`ImageInput`):
+                Image to preprocess. Expects a single or batch of images with pixel values ranging from 0 to 255. If
+                passing in images with pixel values between 0 and 1, set `do_rescale=False`.
+            do_resize (`bool`, *optional*, defaults to `self.do_resize`):
+                Whether to resize the image.
+            size (`Dict[str, int]`, *optional*, defaults to `self.size`):
+                Size of the output image after `resize` has been applied. If `size["shortest_edge"]` >= 384, the image
+                is resized to `(size["shortest_edge"], size["shortest_edge"])`. Otherwise, the smaller edge of the
+                image will be matched to `int(size["shortest_edge"]/ crop_pct)`, after which the image is cropped to
+                `(size["shortest_edge"], size["shortest_edge"])`. Only has an effect if `do_resize` is set to `True`.
+            do_rescale (`bool`, *optional*, defaults to `self.do_rescale`):
+                Whether to rescale the image values between [0 - 1].
+            rescale_factor (`float`, *optional*, defaults to `self.rescale_factor`):
+                Rescale factor to rescale the image by if `do_rescale` is set to `True`.
+            return_tensors (`str` or `TensorType`, *optional*):
+                The type of tensors to return. Can be one of:
+                    - Unset: Return a list of `np.ndarray`.
+                    - `TensorType.TENSORFLOW` or `'tf'`: Return a batch of type `tf.Tensor`.
+                    - `TensorType.PYTORCH` or `'pt'`: Return a batch of type `torch.Tensor`.
+                    - `TensorType.NUMPY` or `'np'`: Return a batch of type `np.ndarray`.
+                    - `TensorType.JAX` or `'jax'`: Return a batch of type `jax.numpy.ndarray`.
+            data_format (`ChannelDimension` or `str`, *optional*, defaults to `ChannelDimension.FIRST`):
+                The channel dimension format for the output image. Can be one of:
+                - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
+                - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
+                - Unset: Use the channel dimension format of the input image.
+            input_data_format (`ChannelDimension` or `str`, *optional*):
+                The channel dimension format for the input image. If unset, the channel dimension format is inferred
+                from the input image. Can be one of:
+                - `"channels_first"` or `ChannelDimension.FIRST`: image in (num_channels, height, width) format.
+                - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
+                - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
+        """
 
-        results = []
-        for image_mask, keypoints, scores, descriptors in zip(
-            outputs.mask, masked_keypoints, outputs.scores, outputs.descriptors
-        ):
-            indices = torch.nonzero(image_mask).squeeze(1)
-            keypoints = keypoints[indices]
-            scores = scores[indices]
-            descriptors = descriptors[indices]
-            results.append({"keypoints": keypoints, "scores": scores, "descriptors": descriptors})
+        do_resize = do_resize if do_resize is not None else self.do_resize
+        do_rescale = do_rescale if do_rescale is not None else self.do_rescale
+        rescale_factor = rescale_factor if rescale_factor is not None else self.rescale_factor
 
-        return results
+        size = size if size is not None else self.size
+        size = get_size_dict(size, default_to_square=False)
 
+        images = make_list_of_images(images)
 
-__all__ = ["SuperPointImageProcessor"]
+        if not valid_images(images):
+            raise ValueError(
+                "Invalid image type. Must be of type PIL.Image.Image, numpy.ndarray, "
+                "torch.Tensor, tf.Tensor or jax.ndarray."
+            )
+
+        if do_resize and size is None:
+            raise ValueError("Size must be specified if do_resize is True.")
+
+        if do_rescale and rescale_factor is None:
+            raise ValueError("Rescale factor must be specified if do_rescale is True.")
+
+        # All transformations expect numpy arrays.
+        images = [to_numpy_array(image) for image in images]
+
+        if is_scaled_image(images[0]) and do_rescale:
+            logger.warning_once(
+                "It looks like you are trying to rescale already rescaled images. If the input"
+                " images have pixel values between 0 and 1, set `do_rescale=False` to avoid rescaling them again."
+            )
+
+        if input_data_format is None:
+            # We assume that all images have the same channel dimension format.
+            input_data_format = infer_channel_dimension_format(images[0])
+
+        if do_resize:
+            images = [self.resize(image=image, size=size, input_data_format=input_data_format) for image in images]
+
+        if do_rescale:
+            images = [
+                self.rescale(image=image, scale=rescale_factor, input_data_format=input_data_format)
+                for image in images
+            ]
+
+        if input_data_format is None:
+            # We assume that all images have the same channel dimension format.
+            input_data_format = infer_channel_dimension_format(images[0])
+
+        # Checking if image is RGB or grayscale
+        for i in range(len(images)):
+            if not is_grayscale(images[i], input_data_format):
+                images[i] = convert_to_grayscale(images[i], input_data_format=input_data_format)
+
+        images = [
+            to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format) for image in images
+        ]
+
+        data = {"pixel_values": images}
+
+        return BatchFeature(data=data, tensor_type=return_tensors)

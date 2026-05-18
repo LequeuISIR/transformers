@@ -13,9 +13,8 @@
 # limitations under the License.
 import argparse
 import os
-from io import BytesIO
 
-import httpx
+import requests
 import torch
 from PIL import Image
 
@@ -81,12 +80,10 @@ def rename_key(dct, old, new):
 
 def prepare_imgs():
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    with httpx.stream("GET", url) as response:
-        image_1 = Image.open(BytesIO(response.read()))
+    im1 = Image.open(requests.get(url, stream=True).raw)
     url = "http://images.cocodataset.org/test-stuff2017/000000004016.jpg"
-    with httpx.stream("GET", url) as response:
-        image_2 = Image.open(BytesIO(response.read()))
-    return [image_1, image_2]
+    im2 = Image.open(requests.get(url, stream=True).raw)
+    return [im1, im2]
 
 
 @torch.no_grad()
@@ -147,7 +144,7 @@ def convert_superpoint_checkpoint(checkpoint_url, pytorch_dump_folder_path, save
         model.save_pretrained(pytorch_dump_folder_path)
         preprocessor.save_pretrained(pytorch_dump_folder_path)
 
-        model_name = "magic-leap-community/superpoint"
+        model_name = "superpoint"
         if push_to_hub:
             print(f"Pushing {model_name} to the hub...")
         model.push_to_hub(model_name)

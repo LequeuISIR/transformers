@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2021 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Convert SEW checkpoint."""
+
 
 import argparse
 import json
@@ -251,7 +253,7 @@ def convert_sew_checkpoint(
         config = convert_config(model[0], is_finetuned)
     model = model[0].eval()
 
-    return_attention_mask = config.feat_extract_norm == "layer"
+    return_attention_mask = True if config.feat_extract_norm == "layer" else False
     feature_extractor = Wav2Vec2FeatureExtractor(
         feature_size=1,
         sampling_rate=16000,
@@ -274,7 +276,7 @@ def convert_sew_checkpoint(
             config.vocab_size = len(target_dict.symbols)
             vocab_path = os.path.join(pytorch_dump_folder_path, "vocab.json")
             if not os.path.isdir(pytorch_dump_folder_path):
-                logger.error(f"--pytorch_dump_folder_path ({pytorch_dump_folder_path}) should be a directory")
+                logger.error("--pytorch_dump_folder_path ({}) should be a directory".format(pytorch_dump_folder_path))
                 return
             os.makedirs(pytorch_dump_folder_path, exist_ok=True)
             with open(vocab_path, "w", encoding="utf-8") as vocab_handle:

@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,10 +17,9 @@
 import argparse
 import json
 from collections import OrderedDict
-from io import BytesIO
 from pathlib import Path
 
-import httpx
+import requests
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -84,8 +84,8 @@ def rename_keys(state_dict):
 # We will verify our results on a COCO image
 def prepare_img():
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    with httpx.stream("GET", url) as response:
-        image = Image.open(BytesIO(response.read()))
+    image = Image.open(requests.get(url, stream=True).raw)
+
     return image
 
 
@@ -151,7 +151,7 @@ def convert_poolformer_checkpoint(model_name, checkpoint_path, pytorch_dump_fold
     logger.info(f"Converting model {model_name}...")
 
     # load original state dict
-    state_dict = torch.load(checkpoint_path, map_location=torch.device("cpu"), weights_only=True)
+    state_dict = torch.load(checkpoint_path, map_location=torch.device("cpu"))
 
     # rename keys
     state_dict = rename_keys(state_dict)

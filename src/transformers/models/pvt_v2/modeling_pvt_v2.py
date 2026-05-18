@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2024 Authors: Wenhai Wang, Enze Xie, Xiang Li, Deng-Ping Fan,
 # Kaitao Song, Ding Liang, Tong Lu, Ping Luo, Ling Shao and The HuggingFace Inc. team.
 # All rights reserved.
@@ -16,22 +17,84 @@
 """PyTorch PVTv2 model."""
 
 import math
+from typing import Optional, Tuple, Union
 
 import torch
+import torch.utils.checkpoint
 from torch import nn
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from ... import initialization as init
 from ...activations import ACT2FN
-from ...backbone_utils import BackboneMixin, filter_output_hidden_states
-from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BackboneOutput, BaseModelOutput, ImageClassifierOutput
 from ...modeling_utils import PreTrainedModel
-from ...utils import auto_docstring, logging
-from ...utils.generic import can_return_tuple
+from ...pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
+from ...utils import (
+    add_code_sample_docstrings,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    logging,
+    replace_return_docstrings,
+)
+from ...utils.backbone_utils import BackboneMixin
 from .configuration_pvt_v2 import PvtV2Config
 
 
 logger = logging.get_logger(__name__)
+
+_CONFIG_FOR_DOC = "PvtV2Config"
+
+_CHECKPOINT_FOR_DOC = "OpenGVLab/pvt_v2_b0"
+_EXPECTED_OUTPUT_SHAPE = [1, 256, 7, 7]
+
+_IMAGE_CLASS_CHECKPOINT = "OpenGVLab/pvt_v2_b0"
+_IMAGE_CLASS_EXPECTED_OUTPUT = "LABEL_281"  # ImageNet ID for "tabby, tabby cat"
+
+PVT_V2_PRETRAINED_MODEL_ARCHIVE_LIST = [
+    "OpenGVLab/pvt_v2_b0",
+    "OpenGVLab/pvt_v2_b1",
+    "OpenGVLab/pvt_v2_b2",
+    "OpenGVLab/pvt_v2_b2_linear",
+    "OpenGVLab/pvt_v2_b3",
+    "OpenGVLab/pvt_v2_b4",
+    "OpenGVLab/pvt_v2_b5",
+    # See all PVT models at https://huggingface.co/models?filter=pvt_v2
+]
+
+
+# Copied from transformers.models.beit.modeling_beit.drop_path
+def drop_path(input: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
+    """
+    Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+
+    Comment by Ross Wightman: This is the same as the DropConnect impl I created for EfficientNet, etc networks,
+    however, the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
+    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for changing the
+    layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use 'survival rate' as the
+    argument.
+    """
+    if drop_prob == 0.0 or not training:
+        return input
+    keep_prob = 1 - drop_prob
+    shape = (input.shape[0],) + (1,) * (input.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    random_tensor = keep_prob + torch.rand(shape, dtype=input.dtype, device=input.device)
+    random_tensor.floor_()  # binarize
+    output = input.div(keep_prob) * random_tensor
+    return output
+
+
+# Copied from transformers.models.convnext.modeling_convnext.ConvNextDropPath with ConvNext->Pvt
+class PvtV2DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
+
+    def __init__(self, drop_prob: Optional[float] = None) -> None:
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return drop_path(hidden_states, self.drop_prob, self.training)
+
+    def extra_repr(self) -> str:
+        return "p={}".format(self.drop_prob)
 
 
 class PvtV2OverlapPatchEmbeddings(nn.Module):
@@ -88,7 +151,7 @@ class PvtV2SelfAttention(nn.Module):
     def __init__(self, config: PvtV2Config, hidden_size: int, num_attention_heads: int, spatial_reduction_ratio: int):
         super().__init__()
         self.linear_attention = config.linear_attention
-
+        self.pruned_heads = set()
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
 
@@ -131,7 +194,7 @@ class PvtV2SelfAttention(nn.Module):
         height: int,
         width: int,
         output_attentions: bool = False,
-    ) -> tuple[torch.Tensor]:
+    ) -> Tuple[torch.Tensor]:
         batch_size, seq_len, num_channels = hidden_states.shape
         query_layer = self.transpose_for_scores(self.query(hidden_states))
 
@@ -170,14 +233,32 @@ class PvtV2SelfAttention(nn.Module):
 
         return outputs
 
+    def prune_heads(self, heads):
+        if len(heads) == 0:
+            return
+        heads, index = find_pruneable_heads_and_indices(
+            heads, self.num_attention_heads, self.attention_head_size, self.pruned_heads
+        )
+
+        # Prune linear layers
+        self.query = prune_linear_layer(self.query, index)
+        self.key = prune_linear_layer(self.key, index)
+        self.value = prune_linear_layer(self.value, index)
+        self.proj = prune_linear_layer(self.proj, index, dim=1)
+
+        # Update hyper params and store pruned heads
+        self.num_attention_heads = self.num_attention_heads - len(heads)
+        self.all_head_size = self.attention_head_size * self.num_attention_heads
+        self.pruned_heads = self.pruned_heads.union(heads)
+
 
 class PvtV2ConvFeedForwardNetwork(nn.Module):
     def __init__(
         self,
         config: PvtV2Config,
         in_features: int,
-        hidden_features: int | None = None,
-        out_features: int | None = None,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
     ):
         super().__init__()
         out_features = out_features if out_features is not None else in_features
@@ -200,31 +281,6 @@ class PvtV2ConvFeedForwardNetwork(nn.Module):
         hidden_states = self.dense2(hidden_states)
         hidden_states = self.dropout(hidden_states)
         return hidden_states
-
-
-# Copied from transformers.models.swin.modular_swin.SwinDropPath with SwinDropPath->PvtV2DropPath
-class PvtV2DropPath(nn.Module):
-    """Stochastic depth (DropPath) per sample, for residual blocks.
-
-    Identity when ``drop_prob`` is 0 or outside training. See `Deep Networks with Stochastic Depth
-    <https://arxiv.org/abs/1603.09382>`_.
-    """
-
-    def __init__(self, drop_prob: float = 0.0) -> None:
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.drop_prob == 0.0 or not self.training:
-            return hidden_states
-        keep_prob = 1 - self.drop_prob
-        shape = (hidden_states.shape[0],) + (1,) * (hidden_states.ndim - 1)
-        random_tensor = torch.rand(shape, dtype=hidden_states.dtype, device=hidden_states.device)
-        random_tensor = torch.floor(random_tensor + keep_prob)
-        return hidden_states.div(keep_prob) * random_tensor
-
-    def extra_repr(self) -> str:
-        return f"p={self.drop_prob}"
 
 
 class PvtV2BlockLayer(nn.Module):
@@ -269,7 +325,7 @@ class PvtV2BlockLayer(nn.Module):
         return outputs
 
 
-class PvtV2EncoderLayer(GradientCheckpointingLayer):
+class PvtV2EncoderLayer(nn.Module):
     def __init__(self, config: PvtV2Config, layer_idx: int):
         super().__init__()
         self.patch_embedding = PvtV2OverlapPatchEmbeddings(
@@ -278,7 +334,7 @@ class PvtV2EncoderLayer(GradientCheckpointingLayer):
         )
         # Transformer block
         # stochastic depth decay rule
-        drop_path_decays = torch.linspace(0, config.drop_path_rate, sum(config.depths), device="cpu").tolist()
+        drop_path_decays = torch.linspace(0, config.drop_path_rate, sum(config.depths)).tolist()
         block_layers = []
         for block_idx in range(config.depths[layer_idx]):
             block_layers.append(
@@ -326,17 +382,20 @@ class PvtV2Encoder(nn.Module):
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        output_attentions: bool | None = False,
-        output_hidden_states: bool | None = False,
-        return_dict: bool | None = True,
-    ) -> tuple | BaseModelOutput:
+        output_attentions: Optional[bool] = False,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
+    ) -> Union[Tuple, BaseModelOutput]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
 
         batch_size = pixel_values.shape[0]
         hidden_states = pixel_values
         for idx, layer in enumerate(self.layers):
-            layer_output = layer(hidden_states, output_attentions)
+            if self.gradient_checkpointing and self.training:
+                layer_output = self._gradient_checkpointing_func(layer.__call__, hidden_states, output_attentions)
+            else:
+                layer_output = layer(hidden_states, output_attentions)
             outputs, height, width = layer_output
             hidden_states = outputs[0]
             if output_attentions:
@@ -354,33 +413,67 @@ class PvtV2Encoder(nn.Module):
         )
 
 
-@auto_docstring
 class PvtV2PreTrainedModel(PreTrainedModel):
-    config: PvtV2Config
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    config_class = PvtV2Config
     base_model_prefix = "pvt_v2"
     main_input_name = "pixel_values"
-    input_modalities = ("image",)
     supports_gradient_checkpointing = True
 
-    @torch.no_grad()
-    def _init_weights(self, module: nn.Linear | nn.Conv2d | nn.LayerNorm) -> None:
+    def _init_weights(self, module: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> None:
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
-            init.trunc_normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            # Upcast the input in `fp32` and cast it back to desired `dtype` to avoid
+            # `trunc_normal_cpu` not implemented in `half` issues
+            module.weight.data = nn.init.trunc_normal_(module.weight.data, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
-                init.zeros_(module.bias)
+                module.bias.data.zero_()
         elif isinstance(module, nn.LayerNorm):
-            init.zeros_(module.bias)
-            init.ones_(module.weight)
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
         elif isinstance(module, nn.Conv2d):
             fan_out = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
             fan_out //= module.groups
-            init.normal_(module.weight, 0, math.sqrt(2.0 / fan_out))
+            module.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
             if module.bias is not None:
-                init.zeros_(module.bias)
+                module.bias.data.zero_()
 
 
-@auto_docstring
+PVT_V2_START_DOCSTRING = r"""
+    This model is a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) sub-class. Use
+    it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage and
+    behavior.
+
+    Parameters:
+        config ([`~PvtV2Config`]): Model configuration class with all the parameters of the model.
+            Initializing with a config file does not load the weights associated with the model, only the
+            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
+"""
+
+PVT_V2_INPUTS_DOCSTRING = r"""
+    Args:
+        pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
+            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See
+            [`PvtImageProcessor.__call__`] for details.
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+            tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+            more detail.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+"""
+
+
+@add_start_docstrings(
+    "The bare Pvt-v2 encoder outputting raw hidden-states without any specific head on top.",
+    PVT_V2_START_DOCSTRING,
+)
 class PvtV2Model(PvtV2PreTrainedModel):
     def __init__(self, config: PvtV2Config):
         super().__init__(config)
@@ -392,20 +485,34 @@ class PvtV2Model(PvtV2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @auto_docstring
+    def _prune_heads(self, heads_to_prune):
+        """
+        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
+        class PreTrainedModel
+        """
+        for layer, heads in heads_to_prune.items():
+            self.encoder.layer[layer].attention.prune_heads(heads)
+
+    @add_start_docstrings_to_model_forward(PVT_V2_INPUTS_DOCSTRING.format("(batch_size, channels, height, width)"))
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=BaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+        modality="vision",
+        expected_output=_EXPECTED_OUTPUT_SHAPE,
+    )
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> tuple | BaseModelOutput:
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, BaseModelOutput]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_outputs = self.encoder(
             pixel_values=pixel_values,
@@ -425,11 +532,12 @@ class PvtV2Model(PvtV2PreTrainedModel):
         )
 
 
-@auto_docstring(
-    custom_intro="""
+@add_start_docstrings(
+    """
     Pvt-v2 Model transformer with an image classification head on top (a linear layer on top of the final hidden state
     of the [CLS] token) e.g. for ImageNet.
-    """
+    """,
+    PVT_V2_START_DOCSTRING,
 )
 class PvtV2ForImageClassification(PvtV2PreTrainedModel):
     def __init__(self, config: PvtV2Config) -> None:
@@ -446,23 +554,28 @@ class PvtV2ForImageClassification(PvtV2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @auto_docstring
+    @add_start_docstrings_to_model_forward(PVT_V2_INPUTS_DOCSTRING.format("(batch_size, channels, height, width)"))
+    @add_code_sample_docstrings(
+        checkpoint=_IMAGE_CLASS_CHECKPOINT,
+        output_type=ImageClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
+        expected_output=_IMAGE_CLASS_EXPECTED_OUTPUT,
+    )
     def forward(
         self,
-        pixel_values: torch.Tensor | None,
-        labels: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> tuple | ImageClassifierOutput:
+        pixel_values: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[tuple, ImageClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the image classification/regression loss. Indices should be in `[0, ...,
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.pvt_v2(
             pixel_values=pixel_values,
@@ -486,7 +599,26 @@ class PvtV2ForImageClassification(PvtV2PreTrainedModel):
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(labels, logits, self.config)
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -500,40 +632,40 @@ class PvtV2ForImageClassification(PvtV2PreTrainedModel):
         )
 
 
-@auto_docstring(
-    custom_intro="""
-    PVTv2 backbone, to be used with frameworks like DETR and MaskFormer.
+@add_start_docstrings(
     """
+    PVTv2 backbone, to be used with frameworks like DETR and MaskFormer.
+    """,
+    PVT_V2_START_DOCSTRING,
 )
-class PvtV2Backbone(BackboneMixin, PvtV2Model):
+class PvtV2Backbone(PvtV2Model, BackboneMixin):
     def __init__(self, config: PvtV2Config):
         super().__init__(config)
+        super()._init_backbone(config)
         self.num_features = config.hidden_sizes
 
-    @can_return_tuple
-    @filter_output_hidden_states
-    @auto_docstring
+    @add_start_docstrings_to_model_forward(PVT_V2_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=BackboneOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> BackboneOutput:
-        r"""
+        """
+        Returns:
+
         Examples:
 
         ```python
         >>> from transformers import AutoImageProcessor, AutoBackbone
         >>> import torch
         >>> from PIL import Image
-        >>> import httpx
-        >>> from io import BytesIO
+        >>> import requests
 
         >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> with httpx.stream("GET", url) as response:
-        ...     image = Image.open(BytesIO(response.read()))
+        >>> image = Image.open(requests.get(url, stream=True).raw)
 
         >>> processor = AutoImageProcessor.from_pretrained("OpenGVLab/pvt_v2_b0")
         >>> model = AutoBackbone.from_pretrained(
@@ -547,7 +679,7 @@ class PvtV2Backbone(BackboneMixin, PvtV2Model):
         >>> list(feature_maps[-1].shape)
         [1, 256, 7, 7]
         ```"""
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -577,6 +709,3 @@ class PvtV2Backbone(BackboneMixin, PvtV2Model):
             hidden_states=outputs.hidden_states if output_hidden_states else None,
             attentions=None,
         )
-
-
-__all__ = ["PvtV2ForImageClassification", "PvtV2Model", "PvtV2PreTrainedModel", "PvtV2Backbone"]

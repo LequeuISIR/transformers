@@ -1,9 +1,15 @@
-from typing import Any, overload
+from typing import Dict
 
 import numpy as np
 
-from ..utils import add_end_docstrings, is_torch_available, logging
+from ..utils import add_end_docstrings, is_tf_available, is_torch_available, logging
 from .base import GenericTensor, Pipeline, PipelineException, build_pipeline_init_args
+
+
+if is_tf_available():
+    import tensorflow as tf
+
+    from ..tf_utils import stable_softmax
 
 
 if is_torch_available():
@@ -16,9 +22,9 @@ logger = logging.get_logger(__name__)
 @add_end_docstrings(
     build_pipeline_init_args(has_tokenizer=True),
     r"""
-        top_k (`int`, *optional*, defaults to 5):
+        top_k (`int`, defaults to 5):
             The number of predictions to return.
-        targets (`str` or `list[str]`, *optional*):
+        targets (`str` or `List[str]`, *optional*):
             When passed, the model will limit the scores to the passed targets instead of looking up in the whole
             vocab. If the provided targets are not in the model vocab, they will be tokenized and the first resulting
             token will be used (with a warning, and that might be slower).
@@ -26,11 +32,6 @@ logger = logging.get_logger(__name__)
             Additional dictionary of keyword arguments passed along to the tokenizer.""",
 )
 class FillMaskPipeline(Pipeline):
-    _load_processor = False
-    _load_image_processor = False
-    _load_feature_extractor = False
-    _load_tokenizer = True
-
     """
     Masked language modeling prediction pipeline using any `ModelWithLMHead`. See the [masked language modeling
     examples](../task_summary#masked-language-modeling) for more information.
@@ -84,7 +85,12 @@ class FillMaskPipeline(Pipeline):
     """
 
     def get_masked_index(self, input_ids: GenericTensor) -> np.ndarray:
-        masked_index = torch.nonzero(input_ids == self.tokenizer.mask_token_id, as_tuple=False)
+        if self.framework == "tf":
+            masked_index = tf.where(input_ids == self.tokenizer.mask_token_id).numpy()
+        elif self.framework == "pt":
+            masked_index = torch.nonzero(input_ids == self.tokenizer.mask_token_id, as_tuple=False)
+        else:
+            raise ValueError("Unsupported framework")
         return masked_index
 
     def _ensure_exactly_one_mask_token(self, input_ids: GenericTensor) -> np.ndarray:
@@ -107,9 +113,9 @@ class FillMaskPipeline(Pipeline):
 
     def preprocess(
         self, inputs, return_tensors=None, tokenizer_kwargs=None, **preprocess_parameters
-    ) -> dict[str, GenericTensor]:
+    ) -> Dict[str, GenericTensor]:
         if return_tensors is None:
-            return_tensors = "pt"
+            return_tensors = self.framework
         if tokenizer_kwargs is None:
             tokenizer_kwargs = {}
 
@@ -129,15 +135,29 @@ class FillMaskPipeline(Pipeline):
         input_ids = model_outputs["input_ids"][0]
         outputs = model_outputs["logits"]
 
-        masked_index = torch.nonzero(input_ids == self.tokenizer.mask_token_id, as_tuple=False).squeeze(-1)
-        # Fill mask pipeline supports only one ${mask_token} per sample
+        if self.framework == "tf":
+            masked_index = tf.where(input_ids == self.tokenizer.mask_token_id).numpy()[:, 0]
 
-        logits = outputs[0, masked_index, :]
-        probs = logits.softmax(dim=-1)
-        if target_ids is not None:
-            probs = probs[..., target_ids]
+            outputs = outputs.numpy()
 
-        values, predictions = probs.topk(top_k)
+            logits = outputs[0, masked_index, :]
+            probs = stable_softmax(logits, axis=-1)
+            if target_ids is not None:
+                probs = tf.gather_nd(tf.squeeze(probs, 0), target_ids.reshape(-1, 1))
+                probs = tf.expand_dims(probs, 0)
+
+            topk = tf.math.top_k(probs, k=top_k)
+            values, predictions = topk.values.numpy(), topk.indices.numpy()
+        else:
+            masked_index = torch.nonzero(input_ids == self.tokenizer.mask_token_id, as_tuple=False).squeeze(-1)
+            # Fill mask pipeline supports only one ${mask_token} per sample
+
+            logits = outputs[0, masked_index, :]
+            probs = logits.softmax(dim=-1)
+            if target_ids is not None:
+                probs = probs[..., target_ids]
+
+            values, predictions = probs.topk(top_k)
 
         result = []
         single_mask = values.shape[0] == 1
@@ -163,7 +183,7 @@ class FillMaskPipeline(Pipeline):
             return result[0]
         return result
 
-    def get_target_ids(self, targets):
+    def get_target_ids(self, targets, top_k=None):
         if isinstance(targets, str):
             targets = [targets]
         try:
@@ -172,7 +192,7 @@ class FillMaskPipeline(Pipeline):
             vocab = {}
         target_ids = []
         for target in targets:
-            id_ = vocab.get(target)
+            id_ = vocab.get(target, None)
             if id_ is None:
                 input_ids = self.tokenizer(
                     target,
@@ -213,7 +233,7 @@ class FillMaskPipeline(Pipeline):
         postprocess_params = {}
 
         if targets is not None:
-            target_ids = self.get_target_ids(targets)
+            target_ids = self.get_target_ids(targets, top_k)
             postprocess_params["target_ids"] = target_ids
 
         if top_k is not None:
@@ -225,20 +245,14 @@ class FillMaskPipeline(Pipeline):
             )
         return preprocess_params, {}, postprocess_params
 
-    @overload
-    def __call__(self, inputs: str, **kwargs: Any) -> list[dict[str, Any]]: ...
-
-    @overload
-    def __call__(self, inputs: list[str], **kwargs: Any) -> list[list[dict[str, Any]]]: ...
-
-    def __call__(self, inputs: str | list[str], **kwargs: Any) -> list[dict[str, Any]] | list[list[dict[str, Any]]]:
+    def __call__(self, inputs, *args, **kwargs):
         """
         Fill the masked token in the text(s) given as inputs.
 
         Args:
-            inputs (`str` or `list[str]`):
+            args (`str` or `List[str]`):
                 One or several texts (or one list of prompts) with masked tokens.
-            targets (`str` or `list[str]`, *optional*):
+            targets (`str` or `List[str]`, *optional*):
                 When passed, the model will limit the scores to the passed targets instead of looking up in the whole
                 vocab. If the provided targets are not in the model vocab, they will be tokenized and the first
                 resulting token will be used (with a warning, and that might be slower).

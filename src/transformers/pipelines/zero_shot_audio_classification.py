@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import UserDict
-from typing import Any
+from typing import Union
 
-import httpx
 import numpy as np
+import requests
 
 from ..utils import (
     add_end_docstrings,
@@ -34,12 +35,6 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
     Zero shot audio classification pipeline using `ClapModel`. This pipeline predicts the class of an audio when you
     provide an audio and a set of `candidate_labels`.
 
-    <Tip warning={true}>
-
-    The default `hypothesis_template` is : `"This is a sound of {}."`. Make sure you update it for your usage.
-
-    </Tip>
-
     Example:
     ```python
     >>> from transformers import pipeline
@@ -48,8 +43,8 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
     >>> dataset = load_dataset("ashraq/esc50")
     >>> audio = next(iter(dataset["train"]["audio"]))["array"]
     >>> classifier = pipeline(task="zero-shot-audio-classification", model="laion/clap-htsat-unfused")
-    >>> classifier(audio, candidate_labels=["Sound of a dog", "Sound of vacuum cleaner"])
-    [{'score': 0.9996, 'label': 'Sound of a dog'}, {'score': 0.0004, 'label': 'Sound of vacuum cleaner'}]
+    >>> classifier(audio, candidate_labels=["Sound of a dog", "Sound of vaccum cleaner"])
+    [{'score': 0.9996, 'label': 'Sound of a dog'}, {'score': 0.0004, 'label': 'Sound of vaccum cleaner'}]
     ```
 
 
@@ -59,36 +54,34 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
     [huggingface.co/models](https://huggingface.co/models?filter=zero-shot-audio-classification).
     """
 
-    _load_processor = False
-    _load_image_processor = False
-    _load_feature_extractor = True
-    _load_tokenizer = True
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def __call__(self, audios: np.ndarray | bytes | str | dict, **kwargs: Any) -> list[dict[str, Any]]:
+        if self.framework != "pt":
+            raise ValueError(f"The {self.__class__} is only available in PyTorch.")
+        # No specific FOR_XXX available yet
+
+    def __call__(self, audios: Union[np.ndarray, bytes, str], **kwargs):
         """
         Assign labels to the audio(s) passed as inputs.
 
         Args:
-            audios (`str`, `list[str]`, `np.array` or `list[np.array]`):
+            audios (`str`, `List[str]`, `np.array` or `List[np.array]`):
                 The pipeline handles three types of inputs:
                 - A string containing a http link pointing to an audio
                 - A string containing a local path to an audio
                 - An audio loaded in numpy
-            candidate_labels (`list[str]`):
-                The candidate labels for this audio. They will be formatted using *hypothesis_template*.
+            candidate_labels (`List[str]`):
+                The candidate labels for this audio
             hypothesis_template (`str`, *optional*, defaults to `"This is a sound of {}"`):
-                The format used in conjunction with *candidate_labels* to attempt the audio classification by
-                replacing the placeholder with the candidate_labels. Pass "{}" if *candidate_labels* are
-                already formatted.
+                The sentence used in cunjunction with *candidate_labels* to attempt the audio classification by
+                replacing the placeholder with the candidate_labels. Then likelihood is estimated by using
+                logits_per_audio
         Return:
-            A list of dictionaries containing one entry per proposed label. Each dictionary contains the
+            A list of dictionaries containing result, one dictionary per proposed label. The dictionaries contain the
             following keys:
-            - **label** (`str`) -- One of the suggested *candidate_labels*.
-            - **score** (`float`) -- The score attributed by the model to that label. It is a value between
-                0 and 1, computed as the `softmax` of `logits_per_audio`.
+            - **label** (`str`) -- The label identified by the model. It is one of the suggested `candidate_label`.
+            - **score** (`float`) -- The score attributed by the model for that label (between 0 and 1).
         """
         return super().__call__(audios, **kwargs)
 
@@ -106,7 +99,7 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
             if audio.startswith("http://") or audio.startswith("https://"):
                 # We need to actually check for a real protocol, otherwise it's impossible to use a local file
                 # like http_huggingface_co.png
-                audio = httpx.get(audio, follow_redirects=True).content
+                audio = requests.get(audio).content
             else:
                 with open(audio, "rb") as f:
                     audio = f.read()
@@ -115,17 +108,16 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
             audio = ffmpeg_read(audio, self.feature_extractor.sampling_rate)
 
         if not isinstance(audio, np.ndarray):
-            raise TypeError("We expect a numpy ndarray as input")
+            raise ValueError("We expect a numpy ndarray as input")
         if len(audio.shape) != 1:
             raise ValueError("We expect a single channel audio input for ZeroShotAudioClassificationPipeline")
 
         inputs = self.feature_extractor(
             [audio], sampling_rate=self.feature_extractor.sampling_rate, return_tensors="pt"
         )
-        inputs = inputs.to(self.dtype)
         inputs["candidate_labels"] = candidate_labels
         sequences = [hypothesis_template.format(x) for x in candidate_labels]
-        text_inputs = self.tokenizer(sequences, return_tensors="pt", padding=True)
+        text_inputs = self.tokenizer(sequences, return_tensors=self.framework, padding=True)
         inputs["text_inputs"] = [text_inputs]
         return inputs
 
@@ -150,8 +142,11 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
         candidate_labels = model_outputs.pop("candidate_labels")
         logits = model_outputs["logits"][0]
 
-        probs = logits.softmax(dim=0)
-        scores = probs.tolist()
+        if self.framework == "pt":
+            probs = logits.softmax(dim=0)
+            scores = probs.tolist()
+        else:
+            raise ValueError("`tf` framework not supported.")
 
         result = [
             {"score": score, "label": candidate_label}

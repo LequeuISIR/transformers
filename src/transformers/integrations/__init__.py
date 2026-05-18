@@ -13,27 +13,22 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from ..utils import OptionalDependencyNotAvailable, _LazyModule, is_torch_available, is_torch_greater_or_equal
+from ..utils import _LazyModule
 
 
 _import_structure = {
     "aqlm": ["replace_with_aqlm_linear"],
     "awq": [
+        "fuse_awq_modules",
         "post_init_awq_exllama_modules",
-        "replace_quantization_scales",
         "replace_with_awq_linear",
     ],
-    "bitnet": [
-        "BitLinear",
-        "pack_weights",
-        "replace_with_bitnet_linear",
-        "unpack_weights",
-    ],
     "bitsandbytes": [
-        "Bnb4bitQuantize",
-        "dequantize_and_replace",
+        "get_keys_to_not_convert",
+        "replace_8bit_linear",
         "replace_with_bnb_linear",
-        "validate_bnb_backend_availability",
+        "set_module_8bit_tensor_to_device",
+        "set_module_quantized_tensor_to_device",
     ],
     "deepspeed": [
         "HfDeepSpeedConfig",
@@ -47,34 +42,6 @@ _import_structure = {
         "set_hf_deepspeed_config",
         "unset_hf_deepspeed_config",
     ],
-    "eetq": ["replace_with_eetq_linear"],
-    "fbgemm_fp8": ["FbgemmFp8Linear", "FbgemmFp8Llama4TextExperts", "replace_with_fbgemm_fp8_linear"],
-    "finegrained_fp8": ["FP8Linear", "replace_with_fp8_linear"],
-    "fsdp": ["is_fsdp_enabled", "is_fsdp_managed_module"],
-    "ggml": [
-        "GGUF_CONFIG_DEFAULTS_MAPPING",
-        "GGUF_CONFIG_MAPPING",
-        "GGUF_TOKENIZER_MAPPING",
-        "_gguf_parse_value",
-        "load_dequant_gguf_tensor",
-        "load_gguf",
-    ],
-    "higgs": [
-        "HiggsLinear",
-        "dequantize_higgs",
-        "quantize_with_higgs",
-        "replace_with_higgs_linear",
-    ],
-    "hqq": ["prepare_for_hqq_linear"],
-    "hub_kernels": [
-        "LayerRepository",
-        "lazy_load_kernel",
-        "register_kernel_mapping",
-        "replace_kernel_forward_from_hub",
-        "use_kernel_forward_from_hub",
-        "use_kernel_func_from_hub",
-        "use_kernelized_func",
-    ],
     "integration_utils": [
         "INTEGRATION_TO_CALLBACK",
         "AzureMLCallback",
@@ -84,13 +51,10 @@ _import_structure = {
         "DagsHubCallback",
         "DVCLiveCallback",
         "FlyteCallback",
-        "KubeflowCallback",
         "MLflowCallback",
         "NeptuneCallback",
         "NeptuneMissingConfiguration",
-        "SwanLabCallback",
         "TensorBoardCallback",
-        "TrackioCallback",
         "WandbCallback",
         "get_available_reporting_integrations",
         "get_reporting_integration_callbacks",
@@ -103,96 +67,37 @@ _import_structure = {
         "is_dvclive_available",
         "is_flyte_deck_standard_available",
         "is_flytekit_available",
-        "is_kubeflow_available",
         "is_mlflow_available",
         "is_neptune_available",
         "is_optuna_available",
         "is_ray_available",
         "is_ray_tune_available",
-        "is_swanlab_available",
+        "is_sigopt_available",
         "is_tensorboard_available",
-        "is_trackio_available",
         "is_wandb_available",
         "rewrite_logs",
         "run_hp_search_optuna",
         "run_hp_search_ray",
+        "run_hp_search_sigopt",
         "run_hp_search_wandb",
-    ],
-    "liger": ["apply_liger_kernel"],
-    "metal_quantization": [
-        "MetalLinear",
-        "replace_with_metal_linear",
-    ],
-    "moe": [
-        "batched_mm_experts_forward",
-        "grouped_mm_experts_forward",
-        "use_experts_implementation",
-    ],
-    "mxfp4": [
-        "Mxfp4GptOssExperts",
-        "convert_moe_packed_tensors",
-        "dequantize",
-        "load_and_swizzle_mxfp4",
-        "quantize_to_mxfp4",
-        "replace_with_mxfp4_linear",
-        "swizzle_mxfp4",
-    ],
-    "neftune": [
-        "activate_neftune",
-        "deactivate_neftune",
-        "neftune_post_forward_hook",
     ],
     "peft": ["PeftAdapterMixin"],
     "quanto": ["replace_with_quanto_layers"],
-    "sinq": ["SinqDeserialize", "SinqQuantize"],
-    "spqr": ["replace_with_spqr_linear"],
-    "vptq": ["replace_with_vptq_linear"],
 }
-
-try:
-    if not is_torch_available():
-        raise OptionalDependencyNotAvailable()
-except OptionalDependencyNotAvailable:
-    pass
-else:
-    _import_structure["executorch"] = [
-        "TorchExportableModuleWithStaticCache",
-        "convert_and_export_with_cache",
-    ]
-
-_import_structure["tensor_parallel"] = [
-    "shard_and_distribute_module",
-    "ALL_PARALLEL_STYLES",
-    "translate_to_torch_parallel_style",
-]
-try:
-    if not is_torch_greater_or_equal("2.5"):
-        raise OptionalDependencyNotAvailable()
-except OptionalDependencyNotAvailable:
-    pass
-else:
-    _import_structure["flex_attention"] = [
-        "make_flex_block_causal_mask",
-    ]
 
 if TYPE_CHECKING:
     from .aqlm import replace_with_aqlm_linear
     from .awq import (
+        fuse_awq_modules,
         post_init_awq_exllama_modules,
-        replace_quantization_scales,
         replace_with_awq_linear,
     )
-    from .bitnet import (
-        BitLinear,
-        pack_weights,
-        replace_with_bitnet_linear,
-        unpack_weights,
-    )
     from .bitsandbytes import (
-        Bnb4bitQuantize,
-        dequantize_and_replace,
+        get_keys_to_not_convert,
+        replace_8bit_linear,
         replace_with_bnb_linear,
-        validate_bnb_backend_availability,
+        set_module_8bit_tensor_to_device,
+        set_module_quantized_tensor_to_device,
     )
     from .deepspeed import (
         HfDeepSpeedConfig,
@@ -206,29 +111,6 @@ if TYPE_CHECKING:
         set_hf_deepspeed_config,
         unset_hf_deepspeed_config,
     )
-    from .eetq import replace_with_eetq_linear
-    from .fbgemm_fp8 import FbgemmFp8Linear, FbgemmFp8Llama4TextExperts, replace_with_fbgemm_fp8_linear
-    from .finegrained_fp8 import FP8Linear, replace_with_fp8_linear
-    from .fsdp import is_fsdp_enabled, is_fsdp_managed_module
-    from .ggml import (
-        GGUF_CONFIG_DEFAULTS_MAPPING,
-        GGUF_CONFIG_MAPPING,
-        GGUF_TOKENIZER_MAPPING,
-        _gguf_parse_value,
-        load_dequant_gguf_tensor,
-        load_gguf,
-    )
-    from .higgs import HiggsLinear, dequantize_higgs, quantize_with_higgs, replace_with_higgs_linear
-    from .hqq import prepare_for_hqq_linear
-    from .hub_kernels import (
-        LayerRepository,
-        lazy_load_kernel,
-        register_kernel_mapping,
-        replace_kernel_forward_from_hub,
-        use_kernel_forward_from_hub,
-        use_kernel_func_from_hub,
-        use_kernelized_func,
-    )
     from .integration_utils import (
         INTEGRATION_TO_CALLBACK,
         AzureMLCallback,
@@ -238,13 +120,10 @@ if TYPE_CHECKING:
         DagsHubCallback,
         DVCLiveCallback,
         FlyteCallback,
-        KubeflowCallback,
         MLflowCallback,
         NeptuneCallback,
         NeptuneMissingConfiguration,
-        SwanLabCallback,
         TensorBoardCallback,
-        TrackioCallback,
         WandbCallback,
         get_available_reporting_integrations,
         get_reporting_integration_callbacks,
@@ -257,67 +136,22 @@ if TYPE_CHECKING:
         is_dvclive_available,
         is_flyte_deck_standard_available,
         is_flytekit_available,
-        is_kubeflow_available,
         is_mlflow_available,
         is_neptune_available,
         is_optuna_available,
         is_ray_available,
         is_ray_tune_available,
-        is_swanlab_available,
+        is_sigopt_available,
         is_tensorboard_available,
-        is_trackio_available,
         is_wandb_available,
         rewrite_logs,
         run_hp_search_optuna,
         run_hp_search_ray,
+        run_hp_search_sigopt,
         run_hp_search_wandb,
     )
-    from .liger import apply_liger_kernel
-    from .metal_quantization import (
-        MetalLinear,
-        replace_with_metal_linear,
-    )
-    from .moe import (
-        batched_mm_experts_forward,
-        grouped_mm_experts_forward,
-        use_experts_implementation,
-    )
-    from .mxfp4 import (
-        Mxfp4GptOssExperts,
-        dequantize,
-        load_and_swizzle_mxfp4,
-        quantize_to_mxfp4,
-        replace_with_mxfp4_linear,
-        swizzle_mxfp4,
-    )
-    from .neftune import activate_neftune, deactivate_neftune, neftune_post_forward_hook
     from .peft import PeftAdapterMixin
     from .quanto import replace_with_quanto_layers
-    from .sinq import SinqDeserialize, SinqQuantize
-    from .spqr import replace_with_spqr_linear
-    from .vptq import replace_with_vptq_linear
-
-    try:
-        if not is_torch_available():
-            raise OptionalDependencyNotAvailable()
-    except OptionalDependencyNotAvailable:
-        pass
-    else:
-        from .executorch import TorchExportableModuleWithStaticCache, convert_and_export_with_cache
-
-    from .tensor_parallel import (
-        ALL_PARALLEL_STYLES,
-        shard_and_distribute_module,
-        translate_to_torch_parallel_style,
-    )
-
-    try:
-        if not is_torch_greater_or_equal("2.5"):
-            raise OptionalDependencyNotAvailable()
-    except OptionalDependencyNotAvailable:
-        pass
-    else:
-        from .flex_attention import make_flex_block_causal_mask
 else:
     import sys
 

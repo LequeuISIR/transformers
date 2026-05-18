@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +16,9 @@
 
 import argparse
 import json
-from io import BytesIO
+from pathlib import Path
 
-import httpx
+import requests
 import timm
 import torch
 from huggingface_hub import hf_hub_download
@@ -129,7 +130,7 @@ def rename_key(name):
 
 
 def convert_state_dict(orig_state_dict, model):
-    for key in orig_state_dict.copy():
+    for key in orig_state_dict.copy().keys():
         val = orig_state_dict.pop(key)
 
         if "mask" in key:
@@ -144,22 +145,22 @@ def convert_state_dict(orig_state_dict, model):
                 orig_state_dict[
                     f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.query.weight"
                 ] = val[:dim, :]
-                orig_state_dict[f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.key.weight"] = (
-                    val[dim : dim * 2, :]
-                )
+                orig_state_dict[
+                    f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.key.weight"
+                ] = val[dim : dim * 2, :]
                 orig_state_dict[
                     f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.value.weight"
                 ] = val[-dim:, :]
             else:
-                orig_state_dict[f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.query.bias"] = (
-                    val[:dim]
-                )
+                orig_state_dict[
+                    f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.query.bias"
+                ] = val[:dim]
                 orig_state_dict[f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.key.bias"] = val[
                     dim : dim * 2
                 ]
-                orig_state_dict[f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.value.bias"] = (
-                    val[-dim:]
-                )
+                orig_state_dict[
+                    f"swinv2.encoder.layers.{layer_num}.blocks.{block_num}.attention.self.value.bias"
+                ] = val[-dim:]
         else:
             orig_state_dict[rename_key(key)] = val
 
@@ -179,9 +180,8 @@ def convert_swinv2_checkpoint(swinv2_name, pytorch_dump_folder_path):
 
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
 
-    image_processor = AutoImageProcessor.from_pretrained(f"microsoft/{swinv2_name.replace('_', '-')}")
-    with httpx.stream("GET", url) as response:
-        image = Image.open(BytesIO(response.read()))
+    image_processor = AutoImageProcessor.from_pretrained("microsoft/{}".format(swinv2_name.replace("_", "-")))
+    image = Image.open(requests.get(url, stream=True).raw)
     inputs = image_processor(images=image, return_tensors="pt")
 
     timm_outs = timm_model(inputs["pixel_values"])
@@ -195,7 +195,11 @@ def convert_swinv2_checkpoint(swinv2_name, pytorch_dump_folder_path):
     print(f"Saving image processor to {pytorch_dump_folder_path}")
     image_processor.save_pretrained(pytorch_dump_folder_path)
 
-    model.push_to_hub(repo_id=f"nandwalritik/{swinv2_name}", commit_message="Add model")
+    model.push_to_hub(
+        repo_path_or_name=Path(pytorch_dump_folder_path, swinv2_name),
+        organization="nandwalritik",
+        commit_message="Add model",
+    )
 
 
 if __name__ == "__main__":

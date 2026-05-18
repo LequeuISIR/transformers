@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2018 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Convert OpenAI GPT checkpoint."""
+
 
 import argparse
 import json
@@ -28,7 +30,7 @@ logging.set_verbosity_info()
 
 def convert_xlm_checkpoint_to_pytorch(xlm_checkpoint_path, pytorch_dump_folder_path):
     # Load checkpoint
-    chkpt = torch.load(xlm_checkpoint_path, map_location="cpu", weights_only=True)
+    chkpt = torch.load(xlm_checkpoint_path, map_location="cpu")
 
     state_dict = chkpt["model"]
 

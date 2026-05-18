@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2021 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Convert Hubert checkpoint."""
+
 
 import argparse
 
@@ -31,7 +33,7 @@ def convert_s3prl_checkpoint(base_model_name, config_path, checkpoint_path, mode
     """
     Copy/paste/tweak model's weights to transformers design.
     """
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if checkpoint["Config"]["downstream_expert"]["modelrc"]["select"] not in SUPPORTED_MODELS:
         raise NotImplementedError(f"The supported s3prl models are {SUPPORTED_MODELS}")
 

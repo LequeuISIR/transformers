@@ -1,3 +1,4 @@
+# coding=utf-8
 # Copyright 2022 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -114,7 +115,7 @@ class Dictionary:
             except FileNotFoundError as fnfe:
                 raise fnfe
             except UnicodeError:
-                raise Exception(f"Incorrect encoding detected in {f}, please rebuild the dataset")
+                raise Exception("Incorrect encoding detected in {}, please rebuild the dataset".format(f))
             return
 
         lines = f.readlines()
@@ -132,11 +133,11 @@ class Dictionary:
                 word = line
                 if word in self and not overwrite:
                     raise RuntimeError(
-                        f"Duplicate word found when loading Dictionary: '{word}'. "
+                        "Duplicate word found when loading Dictionary: '{}'. "
                         "Duplicate words can overwrite earlier ones by adding the "
                         "#fairseq:overwrite flag at the end of the corresponding row "
                         "in the dictionary file. If using the Camembert model, please "
-                        "download an updated copy of the model file."
+                        "download an updated copy of the model file.".format(word)
                     )
                 self.add_symbol(word, n=count, overwrite=overwrite)
             except ValueError:
@@ -147,7 +148,7 @@ def rewrite_dict_keys(d):
     # (1) remove word breaking symbol, (2) add word ending symbol where the word is not broken up,
     # e.g.: d = {'le@@': 5, 'tt@@': 6, 'er': 7} => {'le': 5, 'tt': 6, 'er</w>': 7}
     d2 = dict((re.sub(r"@@$", "", k), v) if k.endswith("@@") else (re.sub(r"$", "</w>", k), v) for k, v in d.items())
-    keep_keys = ["<s>", "<pad>", "</s>", "<unk>"]
+    keep_keys = "<s> <pad> </s> <unk>".split()
     # restore the special tokens
     for k in keep_keys:
         del d2[f"{k}</w>"]
@@ -167,7 +168,7 @@ def convert_biogpt_checkpoint_to_pytorch(biogpt_checkpoint_path, pytorch_dump_fo
     checkpoint_file = os.path.join(biogpt_checkpoint_path, "checkpoint.pt")
     if not os.path.isfile(checkpoint_file):
         raise ValueError(f"path to the file {checkpoint_file} does not exist!")
-    chkpt = torch.load(checkpoint_file, map_location="cpu", weights_only=True)
+    chkpt = torch.load(checkpoint_file, map_location="cpu")
 
     args = chkpt["cfg"]["model"]
 
